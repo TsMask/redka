@@ -1,0 +1,341 @@
+package main
+
+import (
+	"cmp"
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/url"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+
+	"github.com/tsmask/redka"
+	"github.com/tsmask/redka/config"
+	"github.com/tsmask/redka/redsrv"
+)
+
+// set by the build process
+var (
+	version = "main"
+	commit  = "none"
+	date    = "unknown"
+)
+
+const debugPort = 6060
+const sqliteDriverName = "sqlite"
+const sqliteMemoryURI = "file:/redka.db?vfs=memdb"
+const sqlitePragma = `
+pragma journal_mode = wal;
+pragma synchronous = normal;
+pragma temp_store = memory;
+pragma mmap_size = 268435456;
+pragma foreign_keys = on;`
+
+// Config holds the server configuration.
+type Config struct {
+	Host       string
+	Port       string
+	Sock       string // unix socket
+	DSN        string // Database source dsn
+	Password   string // authentication password
+	ConfigFile string // YAML config file path
+	Verbose    bool
+	LogFile    string // log file path (empty means stdout)
+}
+
+func (c *Config) Addr() string {
+	return net.JoinHostPort(c.Host, c.Port)
+}
+
+// Network returns the network type.
+func (c *Config) Network() string {
+	if c.Sock != "" {
+		return "unix"
+	}
+	return "tcp"
+}
+
+func init() {
+	// Set up flag usage message.
+	flag.Usage = func() {
+		_, _ = fmt.Fprintf(flag.CommandLine.Output(), "Usage: redka [options] <data-source>\n")
+		flag.PrintDefaults()
+	}
+}
+
+func main() {
+	config := mustReadConfig()
+	logger := setupLogger(config)
+
+	slog.Info("starting redka", "version", version, "commit", commit, "built_at", date)
+
+	// Prepare a context to handle shutdown signals.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Open the database.
+	db := mustOpenDB(config, logger)
+
+	// Start application and debug servers.
+	ready := make(chan error, 1)
+	srv := startServer(config, db, ready)
+	debugSrv := startDebugServer(config, ready)
+	if err := <-ready; err != nil {
+		slog.Error("startup", "error", err)
+		shutdown(srv, debugSrv)
+		os.Exit(1)
+	}
+	slog.Info("redka started")
+
+	// Wait for a shutdown signal.
+	<-ctx.Done()
+	shutdown(srv, debugSrv)
+	slog.Info("redka stopped")
+}
+
+// mustReadConfig reads the configuration from
+// command line arguments and environment variables.
+func mustReadConfig() Config {
+	var cfg Config
+	flag.StringVar(
+		&cfg.Host, "h",
+		cmp.Or(os.Getenv("REDKA_HOST"), "localhost"),
+		"server host",
+	)
+	flag.StringVar(
+		&cfg.Port, "p",
+		cmp.Or(os.Getenv("REDKA_PORT"), "6379"),
+		"server port",
+	)
+	flag.StringVar(
+		&cfg.Sock, "s",
+		cmp.Or(os.Getenv("REDKA_SOCK"), ""),
+		"server socket (overrides host and port)",
+	)
+	flag.StringVar(
+		&cfg.Password, "a",
+		cmp.Or(os.Getenv("REDKA_PASSWORD"), ""),
+		"require clients to authenticate with this password",
+	)
+	flag.StringVar(
+		&cfg.ConfigFile, "c",
+		"",
+		"configuration file path (YAML format)",
+	)
+	flag.BoolVar(&cfg.Verbose, "v", false, "verbose logging")
+	flag.Parse()
+
+	if len(flag.Args()) > 1 {
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Read DSN from positional argument, environment variable, or default to memory SQLite.
+	cfg.DSN = cmp.Or(flag.Arg(0), os.Getenv("REDKA_DB_DSN"), sqliteMemoryURI)
+
+	// Load configuration from file if specified
+	if cfg.ConfigFile != "" {
+		fileConfig, err := config.Load(cfg.ConfigFile)
+		if err != nil {
+			slog.Error("Failed to load config file", "error", err)
+			os.Exit(1)
+		}
+
+		// Command line arguments override file config
+		if cfg.Host != "localhost" || os.Getenv("REDKA_HOST") != "" {
+			fileConfig.Host = cfg.Host
+		}
+		if cfg.Port != "6379" || os.Getenv("REDKA_PORT") != "" {
+			var port int
+			fmt.Sscanf(cfg.Port, "%d", &port)
+			fileConfig.Port = port
+		}
+		if cfg.Sock != "" || os.Getenv("REDKA_SOCK") != "" {
+			fileConfig.Sock = cmp.Or(cfg.Sock, os.Getenv("REDKA_SOCK"))
+		}
+		if cfg.Password != "" || os.Getenv("REDKA_PASSWORD") != "" {
+			fileConfig.Password = cmp.Or(cfg.Password, os.Getenv("REDKA_PASSWORD"))
+		}
+		if cfg.Verbose {
+			fileConfig.Verbose = true
+		}
+		// Sync log_file from file config
+		if fileConfig.LogFile != "" && cfg.LogFile == "" {
+			cfg.LogFile = fileConfig.LogFile
+		}
+		if cfg.DSN != sqliteMemoryURI || os.Getenv("REDKA_DB_DSN") != "" {
+			fileConfig.DBDSN = cmp.Or(cfg.DSN, os.Getenv("REDKA_DB_DSN"))
+		}
+
+		// Validate and use file config
+		if err := fileConfig.Validate(); err != nil {
+			slog.Error("Invalid configuration", "error", err)
+			os.Exit(1)
+		}
+
+		cfg.Host = fileConfig.Host
+		cfg.Port = fmt.Sprintf("%d", fileConfig.Port)
+		cfg.Sock = fileConfig.Sock
+		cfg.Password = fileConfig.Password
+		cfg.Verbose = fileConfig.Verbose
+		cfg.DSN = fileConfig.DBDSN
+	}
+
+	return cfg
+}
+
+// setupLogger setups a logger for the application.
+func setupLogger(cfg Config) *slog.Logger {
+	logLevel := new(slog.LevelVar)
+
+	// Set log level based on verbose flag
+	if cfg.Verbose {
+		logLevel.Set(slog.LevelDebug) // Debug, Info, Warn, Error
+	} else {
+		logLevel.Set(slog.LevelWarn) // Warn, Error only
+	}
+
+	// Create multi-writer: output to both file and stdout
+	var logWriter io.Writer
+	if cfg.LogFile != "" {
+		// Open log file
+		file, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			slog.Error("Failed to open log file, using stdout only", "error", err, "file", cfg.LogFile)
+			logWriter = os.Stdout
+		} else {
+			// Write to both file and stdout
+			logWriter = io.MultiWriter(file, os.Stdout)
+		}
+	} else {
+		// Only stdout
+		logWriter = os.Stdout
+	}
+
+	logHandler := slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: logLevel})
+	logger := slog.New(logHandler)
+	slog.SetDefault(logger)
+
+	return logger
+}
+
+// mustOpenDB connects to the database.
+func mustOpenDB(cfg Config, logger *slog.Logger) *redka.DB {
+	// Connect to the database using the inferred driver.
+	driverName := inferDriverName(cfg.DSN)
+	opts := redka.Options{
+		DriverName: driverName,
+		Logger:     logger,
+		// Using nil for pragma sets the default options.
+		// We don't want any options, so pass an empty map instead.
+		Pragma: map[string]string{},
+	}
+	db, err := redka.Open(cfg.DSN, &opts)
+	if err != nil {
+		slog.Error("data source", "error", err)
+		os.Exit(1)
+	}
+
+	// Hide password when logging.
+	maskedPath := cfg.DSN
+	if u, err := url.Parse(maskedPath); err == nil && u.User != nil {
+		u.User = url.User(u.User.Username())
+		maskedPath = u.String()
+	}
+	slog.Info("data source", "driver", driverName, "path", maskedPath)
+
+	return db
+}
+
+// inferDriverName infers the driver name from the data source URI.
+func inferDriverName(path string) string {
+	// Infer the driver name based on the data source URI.
+	if strings.HasPrefix(path, "postgres://") {
+		return "postgres"
+	}
+	if strings.HasPrefix(path, "mysql://") || strings.HasPrefix(path, "mariadb://") || strings.Contains(path, "@tcp(") {
+		return "mysql"
+	}
+	return sqliteDriverName
+}
+
+// startServer starts the application server.
+func startServer(cfg Config, db *redka.DB, ready chan error) *redsrv.Server {
+	// Load configuration if config file specified
+	var srvConfig *config.ServerConfig
+	if cfg.ConfigFile != "" {
+		var err error
+		srvConfig, err = config.Load(cfg.ConfigFile)
+		if err != nil {
+			slog.Error("Failed to load config", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	// Create the server.
+	var srv *redsrv.Server
+	if srvConfig != nil {
+		// Use config from file
+		srv = redsrv.NewWithConfig(cfg.Network(), cfg.Addr(), db, srvConfig)
+	} else if cfg.Password != "" {
+		// Use authenticated server
+		if cfg.Sock != "" {
+			srv = redsrv.NewWithAuth("unix", cfg.Sock, db, cfg.Password)
+		} else {
+			srv = redsrv.NewWithAuth("tcp", cfg.Addr(), db, cfg.Password)
+		}
+		slog.Info("password authentication enabled")
+	} else {
+		// No authentication
+		if cfg.Sock != "" {
+			srv = redsrv.New("unix", cfg.Sock, db)
+		} else {
+			srv = redsrv.New("tcp", cfg.Addr(), db)
+		}
+	}
+
+	// Start the server.
+	go func() {
+		if err := srv.Start(ready); err != nil {
+			ready <- fmt.Errorf("start redcon server: %w", err)
+		}
+	}()
+
+	return srv
+}
+
+// startDebugServer starts the debug server.
+func startDebugServer(cfg Config, ready chan<- error) *redsrv.DebugServer {
+	if !cfg.Verbose {
+		return nil
+	}
+	srv := redsrv.NewDebug("localhost", debugPort)
+	go func() {
+		if err := srv.Start(); err != nil {
+			ready <- fmt.Errorf("start debug server: %w", err)
+		}
+	}()
+	return srv
+}
+
+// shutdown stops the main server and the debug server.
+func shutdown(srv *redsrv.Server, debugSrv *redsrv.DebugServer) {
+	slog.Info("stopping redka")
+
+	// Stop the debug server.
+	if debugSrv != nil {
+		if err := debugSrv.Stop(); err != nil {
+			slog.Error("stopping debug server", "error", err)
+		}
+	}
+
+	// Stop the main server.
+	if err := srv.Stop(); err != nil {
+		slog.Error("stopping redcon server", "error", err)
+	}
+}

@@ -1,0 +1,41 @@
+# Redka 服务器配置文件示例
+# 使用 YAML 格式
+
+# ===========================================
+# 服务器网络设置
+# ===========================================
+host: localhost        # 监听地址
+port: 6379            # 监听端口
+sock: ""              # Unix socket 路径（如果设置，将覆盖 host 和 port）
+
+# ===========================================
+# 数据库配置
+# ===========================================
+# 只需一个 DSN 字段，自动根据前缀识别数据库类型
+
+# --- SQLite 示例 ---
+# 支持多种格式：file:, sqlite:, sqlite3: 或直接文件路径
+db_dsn: "file:redka.db?vfs=memdb"
+# db_dsn: "sqlite:/var/lib/redka/redka.db"
+# db_dsn: "sqlite3:data.db"
+# db_dsn: "/path/to/database.db"  # 直接文件路径也会被识别为 SQLite
+
+# --- PostgreSQL 示例 ---
+# db_dsn: "postgres://user:password@localhost:5432/dbname?sslmode=disable"
+# db_dsn: "postgresql://user:pass@host:port/db"  # postgresql:// 也支持
+
+# --- MySQL 示例 ---
+# db_dsn: "mysql://user:password@tcp(localhost:3306)/dbname"
+# db_dsn: "mariadb://user:pass@tcp(host:3306)/db"  # mariadb:// 也支持
+# db_dsn: "user:password@tcp(localhost:3306)/dbname"  # 不带前缀的 MySQL 格式
+
+# ===========================================
+# 安全设置
+# ===========================================
+password: ""          # 认证密码（留空表示不需要认证）
+
+# ===========================================
+# 日志设置
+# ===========================================
+verbose: false        # 是否启用详细日志
+log_file: ""          # 日志文件路径（留空表示输出到 stdout）

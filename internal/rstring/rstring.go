@@ -1,0 +1,662 @@
+// Package rstring is a database-backed string repository.
+// It provides methods to interact with strings in the database.
+package rstring
+
+import (
+	"errors"
+	"time"
+
+	"github.com/tsmask/redka/internal/core"
+	"github.com/tsmask/redka/internal/store"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// DB is a database-backed string repository.
+// A string is a slice of bytes associated with a key.
+// Use the string repository to work with individual strings.
+type DB struct {
+	store  *store.Store
+	update func(f func(tx *Tx) error) error
+	dbIdx  int
+}
+
+// New connects to the string repository.
+// Does not create the database schema.
+func New(s *store.Store) *DB {
+	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
+		return NewTx(dialect, tx, 0)
+	}
+	actor := store.NewTransactor(s, newTxFn)
+	return &DB{store: s, update: actor.Update, dbIdx: 0}
+}
+
+// WithDB returns a new DB instance scoped to the given logical database index.
+func (d *DB) WithDB(dbIdx int) *DB {
+	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
+		return NewTx(dialect, tx, dbIdx)
+	}
+	actor := store.NewTransactor(d.store, newTxFn)
+	return &DB{store: d.store, update: actor.Update, dbIdx: dbIdx}
+}
+
+// Get returns the value of the key.
+// If the key does not exist or is not a string, returns ErrNotFound.
+func (d *DB) Get(key string) (core.Value, error) {
+	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	return tx.Get(key)
+}
+
+// GetMany returns a map of values for given keys.
+// Ignores keys that do not exist or not strings,
+// and does not return them in the map.
+func (d *DB) GetMany(keys ...string) (map[string]core.Value, error) {
+	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	return tx.GetMany(keys...)
+}
+
+// Incr increments the integer key value by the specified amount.
+// Returns the value after the increment.
+// If the key does not exist, sets it to 0 before the increment.
+// If the key value is not an integer, returns ErrValueType.
+// If the key exists but is not a string, returns ErrKeyType.
+func (d *DB) Incr(key string, delta int) (int, error) {
+	var val int
+	err := d.update(func(tx *Tx) error {
+		var err error
+		val, err = tx.Incr(key, delta)
+		return err
+	})
+	return val, err
+}
+
+// IncrFloat increments the float key value by the specified amount.
+// Returns the value after the increment.
+// If the key does not exist, sets it to 0 before the increment.
+// If the key value is not an float, returns ErrValueType.
+// If the key exists but is not a string, returns ErrKeyType.
+func (d *DB) IncrFloat(key string, delta float64) (float64, error) {
+	var val float64
+	err := d.update(func(tx *Tx) error {
+		var err error
+		val, err = tx.IncrFloat(key, delta)
+		return err
+	})
+	return val, err
+}
+
+// Set sets the key value that will not expire.
+// Overwrites the value if the key already exists.
+// If the key exists but is not a string, returns ErrKeyType.
+func (d *DB) Set(key string, value any) error {
+	err := d.update(func(tx *Tx) error {
+		return tx.Set(key, value)
+	})
+	return err
+}
+
+// SetExpire sets the key value with an optional expiration time (if ttl > 0).
+// Overwrites the value and ttl if the key already exists.
+// If the key exists but is not a string, returns ErrKeyType.
+func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
+	err := d.update(func(tx *Tx) error {
+		return tx.SetExpire(key, value, ttl)
+	})
+	return err
+}
+
+// SetMany sets the values of multiple keys.
+// Overwrites values for keys that already exist and
+// creates new keys/values for keys that do not exist.
+// Removes the TTL for existing keys.
+// If any of the keys exists but is not a string, returns ErrKeyType.
+func (d *DB) SetMany(items map[string]any) error {
+	err := d.update(func(tx *Tx) error {
+		return tx.SetMany(items)
+	})
+	return err
+}
+
+// SetWith sets the key value with additional options.
+func (d *DB) SetWith(key string, value any) SetCmd {
+	return SetCmd{db: d, key: key, val: value}
+}
+
+// Tx is a string repository transaction.
+type Tx struct {
+	dialect store.Dialect
+	tx      *gorm.DB
+	dbIdx   int
+}
+
+// NewTx creates a string repository transaction
+// from a generic database transaction.
+func NewTx(dialect store.Dialect, tx *gorm.DB, dbIdx int) *Tx {
+	return &Tx{dialect: dialect, tx: tx, dbIdx: dbIdx}
+}
+
+// Get returns the value of the key.
+// If the key does not exist or is not a string, returns ErrNotFound.
+func (tx *Tx) Get(key string) (core.Value, error) {
+	return tx.get(key)
+}
+
+// GetMany returns a map of values for given keys.
+// Ignores keys that do not exist or not strings,
+// and does not return them in the map.
+func (tx *Tx) GetMany(keys ...string) (map[string]core.Value, error) {
+	now := time.Now().UnixMilli()
+
+	var results []struct {
+		KeyName string
+		Value   []byte
+	}
+	err := tx.tx.Model(&store.RString{}).
+		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = 1").
+		Where("rkey.kdb = ? AND rkey.kname IN ?", tx.dbIdx, keys).
+		Scopes(store.NotExpired(now)).
+		Select("rkey.kname as key_name, rstring.kval as value").
+		Find(&results).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// Fill the map with the values for existing keys.
+	items := make(map[string]core.Value, len(results))
+	for _, r := range results {
+		items[r.KeyName] = core.Value(r.Value)
+	}
+
+	return items, nil
+}
+
+// Incr increments the integer key value by the specified amount.
+// Returns the value after the increment.
+// If the key does not exist, sets it to 0 before the increment.
+// If the key value is not an integer, returns ErrValueType.
+// If the key exists but is not a string, returns ErrKeyType.
+func (tx *Tx) Incr(key string, delta int) (int, error) {
+	// get the current value
+	val, err := tx.Get(key)
+	if err != nil && err != core.ErrNotFound {
+		return 0, err
+	}
+
+	// check if the value is a valid integer
+	valInt, err := val.Int()
+	if err != nil {
+		return 0, core.ErrValueType
+	}
+
+	// increment the value
+	newVal := valInt + delta
+	err = tx.update(key, newVal)
+	if err != nil {
+		return 0, err
+	}
+
+	return newVal, nil
+}
+
+// IncrFloat increments the float key value by the specified amount.
+// Returns the value after the increment.
+// If the key does not exist, sets it to 0 before the increment.
+// If the key value is not an float, returns ErrValueType.
+// If the key exists but is not a string, returns ErrKeyType.
+func (tx *Tx) IncrFloat(key string, delta float64) (float64, error) {
+	// get the current value
+	val, err := tx.Get(key)
+	if err != nil && err != core.ErrNotFound {
+		return 0, err
+	}
+
+	// check if the value is a valid float
+	valFloat, err := val.Float()
+	if err != nil {
+		return 0, core.ErrValueType
+	}
+
+	// increment the value
+	newVal := valFloat + delta
+	err = tx.update(key, newVal)
+	if err != nil {
+		return 0, err
+	}
+
+	return newVal, nil
+}
+
+// Set sets the key value that will not expire.
+// Overwrites the value if the key already exists.
+// If the key exists but is not a string, returns ErrKeyType.
+func (tx *Tx) Set(key string, value any) error {
+	return tx.SetExpire(key, value, 0)
+}
+
+// SetExpire sets the key value with an optional expiration time (if ttl > 0).
+// Overwrites the value and ttl if the key already exists.
+// If the key exists but is not a string, returns ErrKeyType.
+func (tx *Tx) SetExpire(key string, value any, ttl time.Duration) error {
+	var at time.Time
+	if ttl > 0 {
+		at = time.Now().Add(ttl)
+	}
+	err := tx.set(key, value, at)
+	return err
+}
+
+// SetMany sets the values of multiple keys.
+// Overwrites values for keys that already exist and
+// creates new keys/values for keys that do not exist.
+// Removes the TTL for existing keys.
+// If any of the keys exists but is not a string, returns ErrKeyType.
+//
+// Optimized: uses batch queries to reduce O(N) SQL calls to O(1).
+func (tx *Tx) SetMany(items map[string]any) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	// Convert and validate all values first
+	keyNames := make([]string, 0, len(items))
+	values := make(map[string][]byte, len(items))
+	for k, v := range items {
+		if !core.IsValueType(v) {
+			return core.ErrValueType
+		}
+		vb, err := core.ToBytes(v)
+		if err != nil {
+			return err
+		}
+		values[k] = vb
+		keyNames = append(keyNames, k)
+	}
+
+	now := time.Now().UnixMilli()
+
+	// Batch fetch existing keys
+	var existingKeys []store.RKey
+	err := tx.tx.Where("kdb = ? AND kname IN ?", tx.dbIdx, keyNames).Find(&existingKeys).Error
+	if err != nil {
+		return err
+	}
+
+	// Build maps of existing vs new keys
+	existingMap := make(map[string]store.RKey, len(existingKeys))
+	for _, k := range existingKeys {
+		existingMap[k.KName] = k
+	}
+
+	// Separate into existing (type=string) and new keys
+	var existingKeyNames []string
+	var newKeyNames []string
+	for k := range items {
+		if ek, ok := existingMap[k]; ok {
+			if ek.KType != 1 {
+				return core.ErrKeyType
+			}
+			existingKeyNames = append(existingKeyNames, k)
+		} else {
+			newKeyNames = append(newKeyNames, k)
+		}
+	}
+
+	// Batch update existing keys (rkey metadata)
+	if len(existingKeyNames) > 0 {
+		err = tx.tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname IN ?", tx.dbIdx, existingKeyNames).
+			Updates(map[string]interface{}{
+				"kver":        gorm.Expr("kver + 1"),
+				"expire_at":   nil, // clear TTL
+				"modified_at": now,
+				"klen":        1,
+			}).Error
+		if err != nil {
+			return err
+		}
+	}
+
+	// Batch upsert string values for existing keys using INSERT ... ON CONFLICT
+	if len(existingKeyNames) > 0 {
+		rstrings := make([]store.RString, 0, len(existingKeyNames))
+		for _, k := range existingKeyNames {
+			rstrings = append(rstrings, store.RString{
+				KID:  existingMap[k].ID,
+				KVal: values[k],
+			})
+		}
+		err = tx.tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "kid"}},
+			DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+		}).Create(&rstrings).Error
+		if err != nil {
+			return err
+		}
+	}
+
+	// Batch insert new keys (rkey)
+	if len(newKeyNames) > 0 {
+		rkeys := make([]store.RKey, 0, len(newKeyNames))
+		for _, k := range newKeyNames {
+			rkeys = append(rkeys, store.RKey{
+				KDB:        tx.dbIdx,
+				KName:      k,
+				KType:      1, // string type
+				KVer:       1,
+				ExpireAt:   nil,
+				ModifiedAt: now,
+				KLen:       1,
+			})
+		}
+		err = tx.tx.Create(&rkeys).Error
+		if err != nil {
+			return err
+		}
+	}
+
+	// Batch insert string values for new keys
+	// We need the IDs assigned to each new key, so we do a second batch fetch
+	if len(newKeyNames) > 0 {
+		var newKeys []store.RKey
+		err = tx.tx.Where("kdb = ? AND kname IN ?", tx.dbIdx, newKeyNames).Find(&newKeys).Error
+		if err != nil {
+			return err
+		}
+		// Build name->id map for new keys
+		newKeyIDs := make(map[string]int, len(newKeys))
+		for _, k := range newKeys {
+			newKeyIDs[k.KName] = k.ID
+		}
+		rstrings := make([]store.RString, 0, len(newKeyNames))
+		for _, k := range newKeyNames {
+			rstrings = append(rstrings, store.RString{
+				KID:  newKeyIDs[k],
+				KVal: values[k],
+			})
+		}
+		err = tx.tx.Create(&rstrings).Error
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// SetWith sets the key value with additional options.
+func (tx *Tx) SetWith(key string, value any) SetCmd {
+	return SetCmd{tx: tx, key: key, val: value}
+}
+
+func (tx *Tx) get(key string) (core.Value, error) {
+	now := time.Now().UnixMilli()
+
+	var rstr store.RString
+	err := tx.tx.Model(&store.RString{}).
+		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = 1").
+		Where("rkey.kdb = ? AND rkey.kname = ?", tx.dbIdx, key).
+		Scopes(store.NotExpired(now)).
+		Select("rstring.kid, rstring.kval").
+		First(&rstr).Error
+
+	if err == gorm.ErrRecordNotFound {
+		return core.Value(nil), core.ErrNotFound
+	}
+	if err != nil {
+		return core.Value(nil), err
+	}
+	return core.Value(rstr.KVal), nil
+}
+
+// set sets the key value and (optionally) its expiration time.
+func (tx *Tx) set(key string, value any, at time.Time) error {
+	valueb, err := core.ToBytes(value)
+	if err != nil {
+		return err
+	}
+
+	var etime *int64
+	if !at.IsZero() {
+		etime = new(int64)
+		*etime = at.UnixMilli()
+	}
+
+	now := time.Now().UnixMilli()
+
+	// Check if key exists and validate type
+	var rkey store.RKey
+	err = tx.tx.Where("kdb = ? AND kname = ?", tx.dbIdx, key).First(&rkey).Error
+	if err == nil {
+		// Key exists, check type
+		if rkey.KType != 1 {
+			return core.ErrKeyType
+		}
+		// Update existing key: increment version, update etime/mtime/len
+		err = tx.tx.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"kver":        gorm.Expr("kver + 1"),
+				"expire_at":   etime,
+				"modified_at": now,
+				"klen":        1,
+			}).Error
+		if err != nil {
+			return err
+		}
+	} else if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Create new key
+		rkey = store.RKey{
+			KDB:        tx.dbIdx,
+			KName:      key,
+			KType:      1, // string type
+			KVer:       1,
+			ExpireAt:   etime,
+			ModifiedAt: now,
+			KLen:       1,
+		}
+		if err := tx.tx.Create(&rkey).Error; err != nil {
+			return err
+		}
+	} else {
+		return err
+	}
+
+	// Upsert the string value using GORM's OnConflict.
+	rstr := store.RString{
+		KID:  rkey.ID,
+		KVal: valueb,
+	}
+
+	return tx.tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "kid"}},
+		DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+	}).Create(&rstr).Error
+}
+
+// update updates the value of the existing key without changing its
+// expiration time. If the key does not exist, creates a new key with
+// the specified value and no expiration time.
+func (tx *Tx) update(key string, value any) error {
+	valueb, err := core.ToBytes(value)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UnixMilli()
+
+	// Check if key exists and validate type
+	var rkey store.RKey
+	err = tx.tx.Where("kdb = ? AND kname = ?", tx.dbIdx, key).First(&rkey).Error
+	if err == nil {
+		// Key exists, check type
+		if rkey.KType != 1 {
+			return core.ErrKeyType
+		}
+		// Update existing key: increment version, update mtime/len (keep etime)
+		err = tx.tx.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"kver":        gorm.Expr("kver + 1"),
+				"modified_at": now,
+				"klen":        1,
+			}).Error
+		if err != nil {
+			return err
+		}
+	} else if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Create new key (no expiration)
+		rkey = store.RKey{
+			KDB:        tx.dbIdx,
+			KName:      key,
+			KType:      1, // string type
+			KVer:       1,
+			ModifiedAt: now,
+			KLen:       1,
+		}
+		if err := tx.tx.Create(&rkey).Error; err != nil {
+			return err
+		}
+	} else {
+		return err
+	}
+
+	// Upsert the string value using GORM's OnConflict.
+	rstr := store.RString{
+		KID:  rkey.ID,
+		KVal: valueb,
+	}
+
+	return tx.tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "kid"}},
+		DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+	}).Create(&rstr).Error
+}
+
+// SetOut is the output of the Set command.
+type SetOut struct {
+	Prev    core.Value
+	Created bool
+	Updated bool
+}
+
+// SetCmd sets the key value.
+type SetCmd struct {
+	db          *DB
+	tx          *Tx
+	key         string
+	val         any
+	ttl         time.Duration
+	at          time.Time
+	keepTTL     bool
+	ifExists    bool
+	ifNotExists bool
+}
+
+// IfExists instructs to set the value only if the key exists.
+func (c SetCmd) IfExists() SetCmd {
+	c.ifExists = true
+	c.ifNotExists = false
+	return c
+}
+
+// IfNotExists instructs to set the value only if the key does not exist.
+func (c SetCmd) IfNotExists() SetCmd {
+	c.ifExists = false
+	c.ifNotExists = true
+	return c
+}
+
+// TTL sets the time-to-live for the value.
+func (c SetCmd) TTL(ttl time.Duration) SetCmd {
+	c.ttl = ttl
+	c.at = time.Time{}
+	c.keepTTL = false
+	return c
+}
+
+// At sets the expiration time for the value.
+func (c SetCmd) At(at time.Time) SetCmd {
+	c.ttl = 0
+	c.at = at
+	c.keepTTL = false
+	return c
+}
+
+// KeepTTL instructs to keep the expiration time already set for the key.
+func (c SetCmd) KeepTTL() SetCmd {
+	c.ttl = 0
+	c.at = time.Time{}
+	c.keepTTL = true
+	return c
+}
+
+// Run sets the key value according to the configured options.
+// Returns the previous value (if any) and the operation result
+// (if the key was created or updated).
+//
+// Expiration time handling:
+//   - If called with TTL() > 0 or At(), sets the expiration time.
+//   - If called with KeepTTL(), keeps the expiration time already set for the key.
+//   - If called without TTL(), At() or KeepTTL(), sets the value that will not expire.
+//
+// Existence checks:
+//   - If called with IfExists(), sets the value only if the key exists.
+//   - If called with IfNotExists(), sets the value only if the key does not exist.
+//
+// If the key exists but is not a string, returns ErrKeyType (unless called
+// with IfExists(), in which case does nothing).
+func (c SetCmd) Run() (out SetOut, err error) {
+	if c.db != nil {
+		var out SetOut
+		err := c.db.update(func(tx *Tx) error {
+			var err error
+			out, err = c.run(tx)
+			return err
+		})
+		return out, err
+	}
+	if c.tx != nil {
+		return c.run(c.tx)
+	}
+	return SetOut{}, nil
+}
+
+func (c SetCmd) run(tx *Tx) (out SetOut, err error) {
+	if !core.IsValueType(c.val) {
+		return SetOut{}, core.ErrValueType
+	}
+
+	// Get the previous value.
+	prev, err := tx.get(c.key)
+	if err != nil && err != core.ErrNotFound {
+		return SetOut{}, err
+	}
+	exists := err != core.ErrNotFound
+
+	// Set the expiration time.
+	if c.ttl > 0 {
+		c.at = time.Now().Add(c.ttl)
+	}
+
+	// Special cases for exists / not exists checks.
+	if c.ifExists && !exists {
+		// only set if the key exists
+		return SetOut{Prev: prev}, nil
+	}
+	if c.ifNotExists && exists {
+		// only set if the key does not exist
+		return SetOut{Prev: prev}, nil
+	}
+
+	// Set the value.
+	if c.keepTTL {
+		err = tx.update(c.key, c.val)
+	} else {
+		err = tx.set(c.key, c.val, c.at)
+	}
+
+	if err != nil {
+		return SetOut{Prev: prev}, err
+	}
+	return SetOut{Prev: prev, Created: !exists, Updated: exists}, nil
+}
