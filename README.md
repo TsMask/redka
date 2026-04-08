@@ -1,5 +1,7 @@
 <img alt="Redka" src="logo.svg" height="80" align="center">
 
+> This project is based on the secondary modification of [fork nalgeon/redka](https://github.com/nalgeon/redka)
+
 Redka 是一个用 Go 语言实现的 Redis 兼容服务器，使用关系型数据库作为后端存储，同时保持与 Redis API 的完全兼容。
 
 ## 特性

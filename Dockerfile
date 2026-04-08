@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/root/.cache/go-mod \
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 go build \
-    -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
+    -ldflags "-s -w -X config.version=${VERSION} -X config.commit=${COMMIT} -X config.date=${DATE}" \
     -trimpath \
     -o /app/build/redka \
     cmd/redka/main.go

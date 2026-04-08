@@ -3,10 +3,19 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+)
+
+// set by the build process
+var (
+	Version = "main"
+	Commit  = "none"
+	Date    = "unknown"
 )
 
 // ServerConfig represents the server configuration.
@@ -89,11 +98,6 @@ func (c *ServerConfig) Validate() error {
 	return nil
 }
 
-// Addr returns the network address.
-func (c *ServerConfig) Addr() string {
-	return fmt.Sprintf("%s:%d", c.Host, c.Port)
-}
-
 // Network returns the network type.
 func (c *ServerConfig) Network() string {
 	if c.Sock != "" {
@@ -107,18 +111,11 @@ func (c *ServerConfig) Address() string {
 	if c.Sock != "" {
 		return c.Sock
 	}
-	return c.Addr()
-}
-
-// GetDSN returns the database connection string (Data Source Name).
-func (c *ServerConfig) GetDSN() string {
-	return c.DBDSN
+	return net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 }
 
 // InferDriverName infers the database driver name from the DSN prefix.
-// Supports multiple DSN formats for each database type.
-func (c *ServerConfig) InferDriverName() string {
-	dsn := c.DBDSN
+func InferDriverName(dsn string) string {
 
 	// PostgreSQL: postgres:// or postgresql://
 	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {

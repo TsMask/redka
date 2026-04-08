@@ -28,6 +28,9 @@ func logging(next redcon.HandlerFunc, log *slog.Logger) redcon.HandlerFunc {
 // parse parses the command arguments.
 func parse(next redcon.HandlerFunc) redcon.HandlerFunc {
 	return func(conn redcon.Conn, cmd redcon.Command) {
+		if stats := getRuntimeStats(conn); stats != nil {
+			stats.OnCommand(time.Now())
+		}
 		pcmd, err := command.Parse(cmd.Args)
 		if err != nil {
 			conn.WriteError(pcmd.Error(err))
@@ -37,6 +40,16 @@ func parse(next redcon.HandlerFunc) redcon.HandlerFunc {
 		state.push(pcmd)
 		next(conn, cmd)
 	}
+}
+
+func getRuntimeStats(conn redcon.Conn) *redis.RuntimeStats {
+	ctx := connContext(conn)
+	if v := ctx[redis.CtxKeyRuntime]; v != nil {
+		if stats, ok := v.(*redis.RuntimeStats); ok {
+			return stats
+		}
+	}
+	return nil
 }
 
 // multi handles the MULTI, EXEC, and DISCARD commands and delegates

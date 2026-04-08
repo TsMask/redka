@@ -9,6 +9,7 @@ import (
 const (
 	CtxKeyConfig     = "config"
 	CtxKeySelectedDB = "selected_db"
+	CtxKeyRuntime    = "runtime_stats"
 )
 
 // ConnWriter wraps a redcon.Conn to implement the Writer interface.
@@ -122,4 +123,19 @@ func GetSelectedDB(w Writer) int {
 // SetSelectedDB sets the selected database index in the Writer context.
 func SetSelectedDB(w Writer, idx int) {
 	w.SetContext(CtxKeySelectedDB, idx)
+}
+
+// GetRuntimeStats returns runtime stats from the Writer context.
+func GetRuntimeStats(w Writer) *RuntimeStats {
+	if v := w.Context(CtxKeyRuntime); v != nil {
+		if stats, ok := v.(*RuntimeStats); ok {
+			return stats
+		}
+	}
+	return nil
+}
+
+// SetRuntimeStats stores runtime stats in the Writer context.
+func SetRuntimeStats(w Writer, stats *RuntimeStats) {
+	w.SetContext(CtxKeyRuntime, stats)
 }

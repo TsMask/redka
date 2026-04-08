@@ -4,6 +4,7 @@ package redsrv
 import (
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/tidwall/redcon"
 	"github.com/tsmask/redka"
@@ -32,18 +33,11 @@ func New(net string, addr string, db *redka.DB) *Server {
 	return NewWithConfig(net, addr, db, nil)
 }
 
-// NewWithAuth creates a new Redka server with password authentication.
-// The password will be required for all client connections.
-func NewWithAuth(net string, addr string, db *redka.DB, password string) *Server {
-	cfg := config.DefaultConfig()
-	cfg.Password = password
-	return NewWithConfig(net, addr, db, cfg)
-}
-
 // NewWithConfig creates a new Redka server with custom configuration.
 func NewWithConfig(net string, addr string, db *redka.DB, cfg *config.ServerConfig) *Server {
 	log := db.Log()
 	handler := createHandlers(db)
+	runtimeStats := redis.NewRuntimeStats(time.Now(), redis.NewRuntimeRunID())
 
 	// Use provided config or default
 	if cfg == nil {
@@ -54,11 +48,14 @@ func NewWithConfig(net string, addr string, db *redka.DB, cfg *config.ServerConf
 		// Initialize connection context map with config
 		ctx := make(map[string]any)
 		ctx[redis.CtxKeyConfig] = cfg
+		ctx[redis.CtxKeyRuntime] = runtimeStats
 		conn.SetContext(ctx)
+		runtimeStats.OnAccept()
 		log.Info("accept connection", "client", conn.RemoteAddr(), "db", 0)
 		return true
 	}
 	closed := func(conn redcon.Conn, err error) {
+		runtimeStats.OnClose()
 		if err != nil {
 			log.Debug("close connection", "client", conn.RemoteAddr(), "error", err)
 		} else {
