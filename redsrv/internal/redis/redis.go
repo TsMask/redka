@@ -105,16 +105,6 @@ func (cmd BaseCmd) String() string {
 	return b.String()
 }
 
-// MustParse parses a text representation of a command
-// into a command and panics if an error occurs.
-func MustParse[T Cmd](parse func(BaseCmd) (T, error), s string) T {
-	cmd, err := Parse(parse, s)
-	if err != nil {
-		panic(err)
-	}
-	return cmd
-}
-
 // Parse parses a text representation of a command into a command.
 func Parse[T Cmd](parse func(BaseCmd) (T, error), s string) (T, error) {
 	parts := strings.Split(s, " ")

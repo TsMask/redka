@@ -68,9 +68,6 @@ type Options struct {
 	Timeout time.Duration
 	// Logger for the database. If nil, uses a silent logger.
 	Logger *slog.Logger
-
-	// If true, opens the database in read-only mode.
-	readOnly bool
 }
 
 // Application options defaults.
@@ -86,6 +83,7 @@ var defaultOptions = Options{
 // DB is safe for concurrent use by multiple goroutines as long as you use
 // a single instance of DB throughout your program.
 type DB struct {
+	dbIdx    int           // logical database index; set by WithDB (deprecated, use CtxWithDBIdx)
 	store    *store.Store
 	act      *store.Transactor[*Tx]
 	hashDB   *rhash.DB
@@ -94,7 +92,7 @@ type DB struct {
 	setDB    *rset.DB
 	stringDB *rstring.DB
 	zsetDB   *rzset.DB
-	bg       *time.Ticker
+	bg       func() // stop function for background manager goroutine
 	log      *slog.Logger
 }
 
@@ -123,66 +121,20 @@ func Open(path string, opts *Options) (*DB, error) {
 	return new(sdb, opts)
 }
 
-// OpenRead opens an existing database at the given path in read-only mode.
-func OpenRead(path string, opts *Options) (*DB, error) {
-	// Apply the default options if necessary.
-	opts = applyOptions(defaultOptions, opts)
-	opts.readOnly = true
-	sopts := newStoreOptions(opts)
-
-	// Build DSN from path
-	dsn := buildDSN(path, opts.DriverName, sopts.Pragma)
-
-	// Open the database using GORM store
-	sdb, err := store.Open(dsn, sopts.Dialect, sopts.Timeout)
-	if err != nil {
-		return nil, err
-	}
-
-	return new(sdb, opts)
-}
-
 // OpenDB connects to an existing SQL database.
 // Creates the database schema if necessary.
 // The opts parameter is optional. If nil, uses default options.
-func OpenDB(rw *sql.DB, ro *sql.DB, opts *Options) (*DB, error) {
+func OpenDB(db *sql.DB, opts *Options) (*DB, error) {
 	opts = applyOptions(defaultOptions, opts)
 	sopts := newStoreOptions(opts)
 
-	// Convert sql.DB to GORM instances
-	rwGorm, err := gormOpen(rw, sopts.Dialect)
-	if err != nil {
-		return nil, err
-	}
-	roGorm, err := gormOpen(ro, sopts.Dialect)
+	// Convert sql.DB to GORM instance
+	gormDB, err := gormOpen(db, sopts.Dialect)
 	if err != nil {
 		return nil, err
 	}
 
-	sdb, err := store.OpenDB(rwGorm, roGorm, sopts.Dialect, sopts.Timeout)
-	if err != nil {
-		return nil, err
-	}
-	return new(sdb, opts)
-}
-
-// OpenReadDB connects to an existing SQL database in read-only mode.
-func OpenReadDB(db *sql.DB, opts *Options) (*DB, error) {
-	opts = applyOptions(defaultOptions, opts)
-	opts.readOnly = true
-	sopts := newStoreOptions(opts)
-
-	// Convert sql.DB to GORM instances
-	rwGorm, err := gormOpen(db, sopts.Dialect)
-	if err != nil {
-		return nil, err
-	}
-	roGorm, err := gormOpen(db, sopts.Dialect)
-	if err != nil {
-		return nil, err
-	}
-
-	sdb, err := store.OpenDB(rwGorm, roGorm, sopts.Dialect, sopts.Timeout)
+	sdb, err := store.OpenDB(gormDB, sopts.Dialect, sopts.Timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -191,8 +143,10 @@ func OpenReadDB(db *sql.DB, opts *Options) (*DB, error) {
 
 // new creates a new database.
 func new(s *store.Store, opts *Options) (*DB, error) {
-	dbIdx := 0
-	makeTx := func(dialect store.Dialect, tx *gorm.DB) *Tx {
+	// makeTx is called by store.Transactor on each transaction.
+	// It reads dbIdx from the context via CtxDBIdx.
+	makeTx := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
+		dbIdx := store.CtxDBIdx(ctx)
 		return &Tx{
 			dialect: dialect,
 			tx:      tx,
@@ -206,6 +160,7 @@ func new(s *store.Store, opts *Options) (*DB, error) {
 	}
 
 	rdb := &DB{
+		dbIdx:    0,
 		store:    s,
 		act:      store.NewTransactor(s, makeTx),
 		hashDB:   rhash.New(s),
@@ -216,38 +171,31 @@ func new(s *store.Store, opts *Options) (*DB, error) {
 		zsetDB:   rzset.New(s),
 		log:      opts.Logger,
 	}
-	if !opts.readOnly {
-		rdb.bg = rdb.startBgManager()
-	}
+	rdb.bg = rdb.startBgManager()
 	return rdb, nil
 }
 
-// WithDB returns a new DB instance scoped to the given logical database index.
-// All operations on the returned DB will use the specified logical database.
+// WithDB changes the logical database index in place and returns the same DB.
+// It is safe for concurrent use; each TCP connection has its own *DB instance.
 func (db *DB) WithDB(dbIdx int) *DB {
-	makeTx := func(dialect store.Dialect, tx *gorm.DB) *Tx {
-		return &Tx{
-			dialect: dialect,
-			tx:      tx,
-			hashTx:  rhash.NewTx(dialect, tx, dbIdx),
-			keyTx:   rkey.NewTx(dialect, tx, dbIdx),
-			listTx:  rlist.NewTx(dialect, tx, dbIdx),
-			setTx:   rset.NewTx(dialect, tx, dbIdx),
-			strTx:   rstring.NewTx(dialect, tx, dbIdx),
-			zsetTx:  rzset.NewTx(dialect, tx, dbIdx),
-		}
-	}
-	return &DB{
-		store:    db.store,
-		act:      store.NewTransactor(db.store, makeTx),
-		hashDB:   db.hashDB.WithDB(dbIdx),
-		keyDB:    db.keyDB.WithDB(dbIdx),
-		listDB:   db.listDB.WithDB(dbIdx),
-		setDB:    db.setDB.WithDB(dbIdx),
-		stringDB: db.stringDB.WithDB(dbIdx),
-		zsetDB:   db.zsetDB.WithDB(dbIdx),
-		log:      db.log,
-	}
+	db.dbIdx = dbIdx
+	db.hashDB.WithDB(dbIdx)
+	db.keyDB.WithDB(dbIdx)
+	db.listDB.WithDB(dbIdx)
+	db.setDB.WithDB(dbIdx)
+	db.stringDB.WithDB(dbIdx)
+	db.zsetDB.WithDB(dbIdx)
+	return db
+}
+
+// DBIdx returns the current logical database index.
+func (db *DB) DBIdx() int {
+	return db.dbIdx
+}
+
+// SetDBIdx sets the logical database index.
+func (db *DB) SetDBIdx(dbIdx int) {
+	db.dbIdx = dbIdx
 }
 
 // Hash returns the hash repository.
@@ -326,15 +274,16 @@ func (db *DB) ViewContext(ctx context.Context, f func(tx *Tx) error) error {
 // It's safe for concurrent use by multiple goroutines.
 func (db *DB) Close() error {
 	if db.bg != nil {
-		db.bg.Stop()
+		db.bg()
 	}
 	return db.store.Close()
 }
 
-// startBgManager starts the goroutine than runs
+// startBgManager starts the goroutine that runs
 // in the background and deletes expired keys.
 // Triggers every 60 seconds, deletes up all expired keys.
-func (db *DB) startBgManager() *time.Ticker {
+// Returns a stop function to cleanly shut down the goroutine.
+func (db *DB) startBgManager() func() {
 	// TODO: needs further investigation. Deleting all keys may be expensive
 	// and lead to timeouts for concurrent write operations.
 	// Adaptive limits based on the number of changed keys may be a solution.
@@ -345,17 +294,24 @@ func (db *DB) startBgManager() *time.Ticker {
 	const nKeys = 0
 
 	ticker := time.NewTicker(interval)
+	quit := make(chan struct{})
 	go func() {
-		for range ticker.C {
-			count, err := db.keyDB.DeleteExpired(nKeys)
-			if err != nil {
-				db.log.Error("bg: delete expired keys", "error", err)
-			} else {
-				db.log.Info("bg: delete expired keys", "count", count)
+		for {
+			select {
+			case <-ticker.C:
+				count, err := db.keyDB.DeleteExpired(nKeys)
+				if err != nil {
+					db.log.Error("bg: delete expired keys", "error", err)
+				} else if count > 0 {
+					db.log.Info("bg: delete expired keys", "count", count)
+				}
+			case <-quit:
+				ticker.Stop()
+				return
 			}
 		}
 	}()
-	return ticker
+	return func() { close(quit) }
 }
 
 // Tx is a Redis-like database transaction.
@@ -428,10 +384,9 @@ func applyOptions(opts Options, custom *Options) *Options {
 // Infers the SQL dialect from the driver name.
 func newStoreOptions(opts *Options) *store.Options {
 	return &store.Options{
-		Dialect:  store.InferDialect(opts.DriverName),
-		Pragma:   opts.Pragma,
-		Timeout:  opts.Timeout,
-		ReadOnly: opts.readOnly,
+		Dialect: store.InferDialect(opts.DriverName),
+		Pragma:  opts.Pragma,
+		Timeout: opts.Timeout,
 	}
 }
 

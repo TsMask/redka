@@ -1,12 +1,22 @@
 package redsrv
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/tidwall/redcon"
 	"github.com/tsmask/redka/redsrv/internal/redis"
 )
+
+const (
+	// maxQueued is the maximum number of commands that can be queued
+	// in a MULTI transaction. Prevents memory exhaustion from unbounded
+	// QUEUED commands without EXEC or DISCARD.
+	maxQueued = 4096
+)
+
+var errQueueFull = errors.New("ERR transaction queue full")
 
 // normName returns the normalized command name.
 func normName(cmd redcon.Command) string {
@@ -49,8 +59,13 @@ type connState struct {
 }
 
 // push adds a command to the state.
-func (s *connState) push(cmd redis.Cmd) {
+// Returns errQueueFull if the transaction queue exceeds maxQueued.
+func (s *connState) push(cmd redis.Cmd) error {
+	if len(s.cmds) >= maxQueued {
+		return errQueueFull
+	}
 	s.cmds = append(s.cmds, cmd)
+	return nil
 }
 
 // pop removes the last command from the state and returns it.
@@ -63,9 +78,10 @@ func (s *connState) pop() redis.Cmd {
 	return last
 }
 
-// clear removes all commands from the state.
+// clear removes all commands from the state and releases the backing array.
+// Truncating to length 0 allows the GC to reclaim the backing array.
 func (s *connState) clear() {
-	s.cmds = []redis.Cmd{}
+	s.cmds = s.cmds[:0]
 }
 
 // String returns the string representation of the state.

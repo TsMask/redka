@@ -9,43 +9,32 @@ import (
 
 // newMySQL creates a new MySQL database handle using GORM.
 func newMySQL(dsn string, opts *Options) (*Store, error) {
-	// Build RW and RO data sources
-	rwDSN := mysqlDataSource(dsn, false)
-	roDSN := mysqlDataSource(dsn, true)
+	dsn = mysqlDataSource(dsn)
 
-	// Open RW connection
-	rwDB, err := gorm.Open(mysql.Open(rwDSN), gormConfig())
-	if err != nil {
-		return nil, err
-	}
-
-	// Open RO connection
-	// Note: MySQL doesn't have a built-in read-only connection mode like Postgres.
-	// We use the same DSN for both RW and RO connections.
-	roDB, err := gorm.Open(mysql.Open(roDSN), gormConfig())
+	// Open the database connection
+	db, err := gorm.Open(mysql.Open(dsn), gormConfig())
 	if err != nil {
 		return nil, err
 	}
 
 	store := &Store{
-		Dialect:        DialectMySQL,
-		RW:             rwDB,
-		RO:             roDB,
-		Timeout:        opts.Timeout,
-		MaxPoolConns:   opts.MaxPoolConns,
-		MinPoolConns:   opts.MinPoolConns,
+		Dialect:      DialectMySQL,
+		DB:           db,
+		Timeout:      opts.Timeout,
+		MaxPoolConns: opts.MaxPoolConns,
+		MinPoolConns: opts.MinPoolConns,
 	}
 
-	// Configure connection pools
-	if err := store.configurePoolsMySQL(opts.ReadOnly); err != nil {
+	// Configure connection pool
+	if err := store.configurePool(); err != nil {
 		return nil, err
 	}
 
 	return store, nil
 }
 
-// configurePoolsMySQL sets the number of connections for MySQL.
-func (s *Store) configurePoolsMySQL(readOnly bool) error {
+// configurePool sets the number of connections for MySQL.
+func (s *Store) configurePool() error {
 	maxConns := s.MaxPoolConns
 	if maxConns == 0 {
 		maxConns = suggestNumConns()
@@ -55,26 +44,18 @@ func (s *Store) configurePoolsMySQL(readOnly bool) error {
 		minIdle = 2
 	}
 
-	roSqlDB, err := s.RO.DB()
+	sqlDB, err := s.DB.DB()
 	if err != nil {
 		return err
 	}
-	configurePool(roSqlDB, maxConns, minIdle)
-
-	if !readOnly {
-		rwSqlDB, err := s.RW.DB()
-		if err != nil {
-			return err
-		}
-		configurePool(rwSqlDB, maxConns, minIdle)
-	}
+	configurePool(sqlDB, maxConns, minIdle)
 
 	return nil
 }
 
 // mysqlDataSource returns a MySQL connection string with appropriate settings.
 // MySQL DSN format: [username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
-func mysqlDataSource(dsn string, readOnly bool) string {
+func mysqlDataSource(dsn string) string {
 	// Parse the parameters
 	source, query, hasQuery := strings.Cut(dsn, "?")
 
@@ -105,11 +86,6 @@ func mysqlDataSource(dsn string, readOnly bool) string {
 	if _, ok := params["loc"]; !ok {
 		params["loc"] = "Local"
 	}
-
-	// Note: MySQL doesn't have a built-in read-only connection mode parameter.
-	// Read-only enforcement must be done at the application level.
-	// The readOnly parameter is kept for API consistency but not used for MySQL DSN.
-	_ = readOnly
 
 	// Build the query string
 	var sb strings.Builder

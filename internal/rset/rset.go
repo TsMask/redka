@@ -3,6 +3,7 @@
 package rset
 
 import (
+	"context"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -59,20 +60,19 @@ type Scanner struct {
 // New connects to the set repository.
 // Does not create the database schema.
 func New(s *store.Store) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
-		return NewTx(dialect, tx, 0)
+	d := &DB{store: s, dbIdx: 0}
+	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
+		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
 	}
-	actor := store.NewTransactor(s, newTxFn)
-	return &DB{store: s, update: actor.Update, dbIdx: 0}
+	d.update = store.NewTransactor(s, newTxFn).Update
+	return d
 }
 
-// WithDB returns a new DB instance scoped to the given logical database index.
+// WithDB changes the logical database index in place and returns the same DB.
+// It is safe for concurrent use; each TCP connection has its own DB instance.
 func (d *DB) WithDB(dbIdx int) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
-		return NewTx(dialect, tx, dbIdx)
-	}
-	actor := store.NewTransactor(d.store, newTxFn)
-	return &DB{store: d.store, update: actor.Update, dbIdx: dbIdx}
+	d.dbIdx = dbIdx
+	return d
 }
 
 // NewTx creates a set repository transaction
@@ -115,7 +115,7 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 // If the first key does not exist or is not a set, returns an empty slice.
 // If any of the remaining keys do not exist or are not sets, ignores them.
 func (d *DB) Diff(keys ...string) ([]core.Value, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Diff(keys...)
 }
 
@@ -141,7 +141,7 @@ func (d *DB) DiffStore(dest string, keys ...string) (int, error) {
 // Exists reports whether the element belongs to a set.
 // If the key does not exist or is not a set, returns false.
 func (d *DB) Exists(key, elem any) (bool, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Exists(key, elem)
 }
 
@@ -150,7 +150,7 @@ func (d *DB) Exists(key, elem any) (bool, error) {
 // If any of the source keys do not exist or are not sets,
 // returns an empty slice.
 func (d *DB) Inter(keys ...string) ([]core.Value, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Inter(keys...)
 }
 
@@ -174,14 +174,14 @@ func (d *DB) InterStore(dest string, keys ...string) (int, error) {
 // Items returns all elements in a set.
 // If the key does not exist or is not a set, returns an empty slice.
 func (d *DB) Items(key string) ([]core.Value, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Items(key)
 }
 
 // Len returns the number of elements in a set.
 // Returns 0 if the key does not exist or is not a set.
 func (d *DB) Len(key string) (int, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Len(key)
 }
 
@@ -217,7 +217,7 @@ func (d *DB) Pop(key string) (core.Value, error) {
 // Random returns a random element from a set.
 // If the key does not exist or is not a set, returns ErrNotFound.
 func (d *DB) Random(key string) (core.Value, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Random(key)
 }
 
@@ -227,7 +227,7 @@ func (d *DB) Random(key string) (core.Value, error) {
 // If the key does not exist or is not a set, returns an empty slice.
 // Supports glob-style patterns. Set count = 0 for default page size.
 func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Scan(key, cursor, pattern, count)
 }
 
@@ -237,7 +237,7 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 // or an error occurs. If the key does not exist or is not a set, stops immediately.
 // Supports glob-style patterns. Set pageSize = 0 for default page size.
 func (d *DB) Scanner(key, pattern string, pageSize int) *Scanner {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Scanner(key, pattern, pageSize)
 }
 
@@ -246,7 +246,7 @@ func (d *DB) Scanner(key, pattern string, pageSize int) *Scanner {
 // Ignores the keys that do not exist or are not sets.
 // If no keys exist, returns an empty slice.
 func (d *DB) Union(keys ...string) ([]core.Value, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Union(keys...)
 }
 

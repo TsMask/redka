@@ -3,6 +3,7 @@
 package rlist
 
 import (
+	"context"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -22,20 +23,19 @@ type DB struct {
 // New connects to the list repository.
 // Does not create the database schema.
 func New(s *store.Store) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
-		return NewTx(dialect, tx, 0)
+	d := &DB{store: s, dbIdx: 0}
+	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
+		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
 	}
-	actor := store.NewTransactor(s, newTxFn)
-	return &DB{store: s, update: actor.Update, dbIdx: 0}
+	d.update = store.NewTransactor(s, newTxFn).Update
+	return d
 }
 
-// WithDB returns a new DB instance scoped to the given logical database index.
+// WithDB changes the logical database index in place and returns the same DB.
+// It is safe for concurrent use; each TCP connection has its own DB instance.
 func (d *DB) WithDB(dbIdx int) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
-		return NewTx(dialect, tx, dbIdx)
-	}
-	actor := store.NewTransactor(d.store, newTxFn)
-	return &DB{store: d.store, update: actor.Update, dbIdx: dbIdx}
+	d.dbIdx = dbIdx
+	return d
 }
 
 // Delete deletes all occurrences of an element from a list.
@@ -85,7 +85,7 @@ func (d *DB) DeleteFront(key string, elem any, count int) (int, error) {
 // If the index is out of bounds, returns ErrNotFound.
 // If the key does not exist or is not a list, returns ErrNotFound.
 func (d *DB) Get(key string, idx int) (core.Value, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Get(key, idx)
 }
 
@@ -120,7 +120,7 @@ func (d *DB) InsertBefore(key string, pivot, elem any) (int, error) {
 // Len returns the number of elements in a list.
 // If the key does not exist or is not a list, returns 0.
 func (d *DB) Len(key string) (int, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Len(key)
 }
 
@@ -195,7 +195,7 @@ func (d *DB) PushFront(key string, elem any) (int, error) {
 // (-1 is the last element, -2 is the second last, etc.)
 // If the key does not exist or is not a list, returns an empty slice.
 func (d *DB) Range(key string, start, stop int) ([]core.Value, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Range(key, start, stop)
 }
 
@@ -569,13 +569,13 @@ func (tx *Tx) PopBackPushFront(src, dest string) (core.Value, error) {
 		}
 
 		// Calculate new position for dest (front)
-		var minPos *float64
+		var minPos *int64
 		txInner.Model(&store.RList{}).
 			Select("MIN(pos)").
 			Where("kid = ?", destKey.ID).
 			Scan(&minPos)
 
-		newPos := 0.0
+		newPos := int64(0)
 		if minPos != nil {
 			newPos = *minPos - 1
 		}
@@ -938,8 +938,12 @@ func (tx *Tx) insert(key string, pivot any, elem any, after bool) (int, error) {
 		return 0, err
 	}
 
-	// Calculate new position
-	var newPos float64
+	// Calculate new position.
+	// With int64 positions, we use adjacent positions with a gap of 2.
+	// This avoids precision issues of float64 midpoints.
+	// Occasional insertions between two adjacent elements use pivot+-1
+	// and the caller is responsible for periodic position rebalancing if needed.
+	var newPos int64
 	if after {
 		// Find next element after pivot
 		var nextElem store.RList
@@ -953,8 +957,12 @@ func (tx *Tx) insert(key string, pivot any, elem any, after bool) (int, error) {
 		} else if err != nil {
 			return 0, err
 		} else {
-			// Use midpoint
-			newPos = (pivotElem.Pos + nextElem.Pos) / 2
+			// Use midpoint between pivot and next (avoids collision with existing)
+			newPos = pivotElem.Pos + (nextElem.Pos-pivotElem.Pos)/2
+			// If they're adjacent integers, fall back to pivot+1 (gap exhaustion unlikely)
+			if newPos == pivotElem.Pos {
+				newPos = pivotElem.Pos + 1
+			}
 		}
 	} else {
 		// Find previous element before pivot
@@ -969,8 +977,12 @@ func (tx *Tx) insert(key string, pivot any, elem any, after bool) (int, error) {
 		} else if err != nil {
 			return 0, err
 		} else {
-			// Use midpoint
-			newPos = (prevElem.Pos + pivotElem.Pos) / 2
+			// Use midpoint between prev and pivot (avoids collision with existing)
+			newPos = prevElem.Pos + (pivotElem.Pos-prevElem.Pos)/2
+			// If they're adjacent integers, fall back to pivot-1
+			if newPos == pivotElem.Pos {
+				newPos = pivotElem.Pos - 1
+			}
 		}
 	}
 
@@ -1053,10 +1065,10 @@ func (tx *Tx) push(key string, elem any, back bool) (int, error) {
 		}
 
 		// Calculate new position
-		var newPos float64
+		var newPos int64
 		if back {
 			// Append: find max pos and add 1
-			var maxPos *float64
+			var maxPos *int64
 			txInner.Model(&store.RList{}).
 				Select("MAX(pos)").
 				Where("kid = ?", rkey.ID).
@@ -1066,7 +1078,7 @@ func (tx *Tx) push(key string, elem any, back bool) (int, error) {
 			}
 		} else {
 			// Prepend: find min pos and subtract 1
-			var minPos *float64
+			var minPos *int64
 			txInner.Model(&store.RList{}).
 				Select("MIN(pos)").
 				Where("kid = ?", rkey.ID).

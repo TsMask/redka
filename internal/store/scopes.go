@@ -13,13 +13,6 @@ func NotExpired(now int64) func(db *gorm.DB) *gorm.DB {
 	}
 }
 
-// ByKeyAndDB returns a GORM scope that filters by key name and database index.
-func ByKeyAndDB(key string, dbIndex int) func(db *gorm.DB) *gorm.DB {
-	return func(db *gorm.DB) *gorm.DB {
-		return db.Where("kname = ? AND kdb = ?", key, dbIndex)
-	}
-}
-
 // LimitAll returns a GORM scope that removes the default limit for a dialect.
 // Different databases have different ways to express "no limit":
 //   - SQLite: LIMIT -1
@@ -72,21 +65,6 @@ func ElemPattern(dialect Dialect, column string, pattern string) clause.Expressi
 	}
 	// MySQL: VARBINARY supports LIKE directly
 	return clause.Expr{SQL: column + " LIKE ? ESCAPE '#'", Vars: []any{likePattern}}
-}
-
-// NowExpr returns a dialect-aware SQL expression for the current time in milliseconds.
-// This returns a clause.Expr that can be used in GORM queries.
-func NowExpr(dialect Dialect) clause.Expr {
-	switch dialect {
-	case DialectSQLite:
-		return clause.Expr{SQL: "unixepoch('subsec') * 1000"}
-	case DialectPostgres:
-		return clause.Expr{SQL: "(extract(epoch from now()) * 1000)::bigint"}
-	case DialectMySQL:
-		return clause.Expr{SQL: "(UNIX_TIMESTAMP(NOW(3)) * 1000)"}
-	default:
-		return clause.Expr{SQL: "0"}
-	}
 }
 
 // RandomOrder returns a GORM scope that orders results randomly.

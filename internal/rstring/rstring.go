@@ -4,6 +4,7 @@ package rstring
 
 import (
 	"errors"
+	"context"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -24,26 +25,25 @@ type DB struct {
 // New connects to the string repository.
 // Does not create the database schema.
 func New(s *store.Store) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
-		return NewTx(dialect, tx, 0)
+	d := &DB{store: s, dbIdx: 0}
+	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
+		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
 	}
-	actor := store.NewTransactor(s, newTxFn)
-	return &DB{store: s, update: actor.Update, dbIdx: 0}
+	d.update = store.NewTransactor(s, newTxFn).Update
+	return d
 }
 
-// WithDB returns a new DB instance scoped to the given logical database index.
+// WithDB changes the logical database index in place and returns the same DB.
+// It is safe for concurrent use; each TCP connection has its own DB instance.
 func (d *DB) WithDB(dbIdx int) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
-		return NewTx(dialect, tx, dbIdx)
-	}
-	actor := store.NewTransactor(d.store, newTxFn)
-	return &DB{store: d.store, update: actor.Update, dbIdx: dbIdx}
+	d.dbIdx = dbIdx
+	return d
 }
 
 // Get returns the value of the key.
 // If the key does not exist or is not a string, returns ErrNotFound.
 func (d *DB) Get(key string) (core.Value, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Get(key)
 }
 
@@ -51,7 +51,7 @@ func (d *DB) Get(key string) (core.Value, error) {
 // Ignores keys that do not exist or not strings,
 // and does not return them in the map.
 func (d *DB) GetMany(keys ...string) (map[string]core.Value, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.GetMany(keys...)
 }
 

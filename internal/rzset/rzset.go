@@ -3,6 +3,7 @@
 package rzset
 
 import (
+	"context"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -47,20 +48,18 @@ type DB struct {
 // New connects to the sorted set repository.
 // Does not create the database schema.
 func New(s *store.Store) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
-		return NewTx(dialect, tx, 0)
+	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
+		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
 	}
 	actor := store.NewTransactor(s, newTxFn)
 	return &DB{store: s, update: actor.Update, dbIdx: 0}
 }
 
-// WithDB returns a new DB instance scoped to the given logical database index.
+// WithDB changes the logical database index in place and returns the same DB.
+// It is safe for concurrent use; each TCP connection has its own DB instance.
 func (d *DB) WithDB(dbIdx int) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB) *Tx {
-		return NewTx(dialect, tx, dbIdx)
-	}
-	actor := store.NewTransactor(d.store, newTxFn)
-	return &DB{store: d.store, update: actor.Update, dbIdx: dbIdx}
+	d.dbIdx = dbIdx
+	return d
 }
 
 // Add adds or updates an element in a set.
@@ -95,7 +94,7 @@ func (d *DB) AddMany(key string, items map[any]float64) (int, error) {
 // min and max (inclusive). Exclusive ranges are not supported.
 // Returns 0 if the key does not exist or is not a set.
 func (d *DB) Count(key string, min, max float64) (int, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Count(key, min, max)
 }
 
@@ -124,7 +123,7 @@ func (d *DB) DeleteWith(key string) DeleteCmd {
 // If the element does not exist, returns ErrNotFound.
 // If the key does not exist or is not a set, returns ErrNotFound.
 func (d *DB) GetRank(key string, elem any) (rank int, score float64, err error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.GetRank(key, elem)
 }
 
@@ -134,7 +133,7 @@ func (d *DB) GetRank(key string, elem any) (rank int, score float64, err error) 
 // If the element does not exist, returns ErrNotFound.
 // If the key does not exist or is not a set, returns ErrNotFound.
 func (d *DB) GetRankRev(key string, elem any) (rank int, score float64, err error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.GetRankRev(key, elem)
 }
 
@@ -142,7 +141,7 @@ func (d *DB) GetRankRev(key string, elem any) (rank int, score float64, err erro
 // If the element does not exist, returns ErrNotFound.
 // If the key does not exist or is not a set, returns ErrNotFound.
 func (d *DB) GetScore(key string, elem any) (float64, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.GetScore(key, elem)
 }
 
@@ -178,7 +177,7 @@ func (d *DB) InterWith(keys ...string) InterCmd {
 // Len returns the number of elements in a set.
 // Returns 0 if the key does not exist or is not a set.
 func (d *DB) Len(key string) (int, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Len(key)
 }
 
@@ -188,13 +187,13 @@ func (d *DB) Len(key string) (int, error) {
 // Start and stop are 0-based, inclusive. Negative values are not supported.
 // If the key does not exist or is not a set, returns a nil slice.
 func (d *DB) Range(key string, start, stop int) ([]SetItem, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Range(key, start, stop)
 }
 
 // RangeWith ranges elements from a set with additional options.
 func (d *DB) RangeWith(key string) RangeCmd {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.RangeWith(key)
 }
 
@@ -205,7 +204,7 @@ func (d *DB) RangeWith(key string) RangeCmd {
 // If the key does not exist or is not a set, returns a nil slice.
 // Supports glob-style patterns. Set count = 0 for default page size.
 func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult, error) {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Scan(key, cursor, pattern, count)
 }
 
@@ -215,7 +214,7 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 // or an error occurs. If the key does not exist or is not a set, stops immediately.
 // Supports glob-style patterns. Set pageSize = 0 for default page size.
 func (d *DB) Scanner(key, pattern string, pageSize int) *Scanner {
-	tx := NewTx(d.store.Dialect, d.store.RO, d.dbIdx)
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Scanner(key, pattern, pageSize)
 }
 
@@ -1355,7 +1354,7 @@ func (c InterCmd) Max() InterCmd {
 // If any of the source keys do not exist or are not sets, returns an empty slice.
 func (c InterCmd) Run() ([]SetItem, error) {
 	if c.db != nil {
-		tx := NewTx(c.db.store.Dialect, c.db.store.RO, c.db.dbIdx)
+		tx := NewTx(c.db.store.Dialect, c.db.store.DB, c.db.dbIdx)
 		return c.run(tx)
 	}
 	if c.tx != nil {
@@ -1553,7 +1552,7 @@ func (c UnionCmd) Max() UnionCmd {
 // If no keys exist, returns a nil slice.
 func (c UnionCmd) Run() ([]SetItem, error) {
 	if c.db != nil {
-		tx := NewTx(c.db.store.Dialect, c.db.store.RO, c.db.dbIdx)
+		tx := NewTx(c.db.store.Dialect, c.db.store.DB, c.db.dbIdx)
 		return c.run(tx)
 	}
 	if c.tx != nil {

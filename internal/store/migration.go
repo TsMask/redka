@@ -15,7 +15,7 @@ func (s *Store) Migrate() error {
 
 // autoMigrate creates/updates tables using GORM AutoMigrate.
 func (s *Store) autoMigrate() error {
-	return s.RW.AutoMigrate(
+	return s.DB.AutoMigrate(
 		&RKey{},
 		&RString{},
 		&RHash{},

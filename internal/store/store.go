@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"runtime"
 	"time"
@@ -18,12 +19,9 @@ type Options struct {
 	Dialect Dialect
 	// Options to set on the database connection.
 	// If nil, uses the engine-specific defaults.
-	// If the map is empty, no options are set.
 	Pragma map[string]string
 	// Timeout for database operations.
 	Timeout time.Duration
-	// Whether the database is read-only.
-	ReadOnly bool
 	// MaxPoolConns is the maximum number of open connections in the pool.
 	// If 0, uses a sensible default based on GOMAXPROCS.
 	MaxPoolConns int
@@ -33,14 +31,24 @@ type Options struct {
 }
 
 // Store is a database handle using GORM.
-// Has separate connection pools for read-write and read-only operations.
 type Store struct {
-	Dialect     Dialect       // database dialect
-	RW          *gorm.DB      // read-write handle
-	RO          *gorm.DB      // read-only handle
-	Timeout     time.Duration // transaction timeout
-	MaxPoolConns int          // max connections (0 = auto)
-	MinPoolConns int          // min idle connections (0 = auto)
+	Dialect      Dialect       // database dialect
+	DB           *gorm.DB      // primary database handle
+	Timeout      time.Duration // transaction timeout
+	MaxPoolConns int           // max connections (0 = auto)
+	MinPoolConns int           // min idle connections (0 = auto)
+	dbIdx        int           // current logical database index (0-15)
+}
+
+// DBIdx returns the current logical database index.
+func (s *Store) DBIdx() int {
+	return s.dbIdx
+}
+
+// SetDBIdx sets the current logical database index.
+// Exported for use by type packages via store.Store.
+func (s *Store) SetDBIdx(idx int) {
+	s.dbIdx = idx
 }
 
 // Open creates a new database handle from a DSN.
@@ -50,55 +58,22 @@ func Open(dsn string, dialect Dialect, timeout time.Duration) (*Store, error) {
 		Dialect: dialect,
 		Timeout: timeout,
 	}
-	return OpenWithOptions(dsn, opts)
-}
-
-// OpenWithOptions creates a new database handle from a DSN with custom options.
-// Creates the database schema if necessary.
-func OpenWithOptions(dsn string, opts *Options) (*Store, error) {
-	store, err := NewWithOptions(dsn, opts)
-	if err != nil {
-		return nil, err
-	}
-	if err := store.Migrate(); err != nil {
-		return nil, err
-	}
-	return store, nil
-}
-
-// New creates a new database handle from a DSN.
-// Like Open, but does not create the database schema.
-func New(dsn string, dialect Dialect, timeout time.Duration) (*Store, error) {
-	opts := &Options{
-		Dialect: dialect,
-		Timeout: timeout,
-	}
-	return NewWithOptions(dsn, opts)
-}
-
-// NewWithOptions creates a new database handle from a DSN with custom options.
-// Like OpenWithOptions, but does not create the database schema.
-func NewWithOptions(dsn string, opts *Options) (*Store, error) {
 	if opts.Timeout == 0 {
 		opts.Timeout = DefaultTimeout
 	}
 
-	switch opts.Dialect {
+	var store *Store
+	var err error
+	switch dialect {
 	case DialectSQLite:
-		return newSQLite(dsn, opts)
+		store, err = newSQLite(dsn, opts)
 	case DialectPostgres:
-		return newPostgres(dsn, opts)
+		store, err = newPostgres(dsn, opts)
 	case DialectMySQL:
-		return newMySQL(dsn, opts)
+		store, err = newMySQL(dsn, opts)
 	default:
 		return nil, ErrDialect
 	}
-}
-
-// OpenDB creates a new Store using existing GORM instances.
-// Creates the database schema if necessary.
-func OpenDB(rw *gorm.DB, ro *gorm.DB, dialect Dialect, timeout time.Duration) (*Store, error) {
-	store, err := NewDB(rw, ro, dialect, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -108,54 +83,46 @@ func OpenDB(rw *gorm.DB, ro *gorm.DB, dialect Dialect, timeout time.Duration) (*
 	return store, nil
 }
 
-// NewDB creates a new Store using existing GORM instances.
-// Like OpenDB, but does not create the database schema.
-func NewDB(rw *gorm.DB, ro *gorm.DB, dialect Dialect, timeout time.Duration) (*Store, error) {
+// OpenDB creates a new Store using an existing GORM instance.
+// Creates the database schema if necessary.
+func OpenDB(db *gorm.DB, dialect Dialect, timeout time.Duration) (*Store, error) {
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
-	return &Store{
+	store := &Store{
 		Dialect: dialect,
-		RW:      rw,
-		RO:      ro,
+		DB:      db,
 		Timeout: timeout,
-	}, nil
+	}
+	if err := store.Migrate(); err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
-// Close closes the underlying sql.DB connections.
+// Close closes the underlying sql.DB connection.
 func (s *Store) Close() error {
-	var errs []error
-
-	if s.RW != nil {
-		if sqlDB, err := s.RW.DB(); err == nil {
-			if err := sqlDB.Close(); err != nil {
-				errs = append(errs, err)
-			}
-		}
+	if s.DB == nil {
+		return nil
 	}
-
-	if s.RO != nil && s.RO != s.RW {
-		if sqlDB, err := s.RO.DB(); err == nil {
-			if err := sqlDB.Close(); err != nil {
-				errs = append(errs, err)
-			}
-		}
-	}
-
-	if len(errs) > 0 {
-		return errs[0]
+	if sqlDB, err := s.DB.DB(); err == nil {
+		return sqlDB.Close()
 	}
 	return nil
 }
 
-// SQL returns the underlying *sql.DB for the read-write connection.
+// SQL returns the underlying *sql.DB.
 func (s *Store) SQL() (*sql.DB, error) {
-	return s.RW.DB()
+	return s.DB.DB()
 }
 
-// SQLRO returns the underlying *sql.DB for the read-only connection.
-func (s *Store) SQLRO() (*sql.DB, error) {
-	return s.RO.DB()
+// Ping verifies that the database connection is alive.
+func (s *Store) Ping(ctx context.Context) error {
+	if sqlDB, err := s.DB.DB(); err != nil {
+		return err
+	} else {
+		return sqlDB.PingContext(ctx)
+	}
 }
 
 // suggestNumConns calculates the optimal number
@@ -187,10 +154,37 @@ func gormConfig() *gorm.Config {
 	}
 }
 
+// Note on PrepareStmt:
+// With PrepareStmt:true, GORM caches prepared statements at the sql.DB level.
+// There is no built-in upper limit on cached statements. In environments with
+// very high query diversity (many different key names, field names, etc.),
+// the cache may grow indefinitely. To monitor this, poll sql.DB.Stats() and
+// track open connection count. Consider setting MaxOpenConns to bound memory
+// usage if you observe unbounded growth in production with diverse workloads.
+
 // configurePool sets the connection pool size for a sql.DB.
 func configurePool(sqlDB *sql.DB, maxOpen, maxIdle int) {
 	sqlDB.SetMaxOpenConns(maxOpen)
 	sqlDB.SetMaxIdleConns(maxIdle)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute) // Prevent stale connections
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Reclaim idle connections
+}
+
+// ctxKeyDBIdx is the context key for the current database index.
+var ctxKeyDBIdx = "dbIdx"
+
+// CtxWithDBIdx returns a context that carries the given database index.
+func CtxWithDBIdx(parent context.Context, dbIdx int) context.Context {
+	return context.WithValue(parent, ctxKeyDBIdx, dbIdx)
+}
+
+// CtxDBIdx retrieves the database index from a context.
+// Returns 0 if not set.
+func CtxDBIdx(ctx context.Context) int {
+	if v := ctx.Value(ctxKeyDBIdx); v != nil {
+		if idx, ok := v.(int); ok {
+			return idx
+		}
+	}
+	return 0
 }

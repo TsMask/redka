@@ -45,11 +45,12 @@ func (RHash) TableName() string { return "rhash" }
 
 // RList stores list elements with position.
 // Ordered by position within each key.
+// Position is an int64 to avoid float64 precision issues with large lists.
 type RList struct {
-	ID   int     `gorm:"column:id;primaryKey;autoIncrement"` // For Postgres/MySQL
-	KID  int     `gorm:"column:kid;uniqueIndex:rlist_uniq_idx,priority:1;not null"`
-	Pos  float64 `gorm:"column:pos;uniqueIndex:rlist_uniq_idx,priority:2;not null"`
-	Elem []byte  `gorm:"column:elem;not null"`
+	ID   int    `gorm:"column:id;primaryKey;autoIncrement"` // For Postgres/MySQL
+	KID  int    `gorm:"column:kid;uniqueIndex:rlist_uniq_idx,priority:1;not null"`
+	Pos  int64  `gorm:"column:pos;uniqueIndex:rlist_uniq_idx,priority:2;not null"`
+	Elem []byte `gorm:"column:elem;not null"`
 }
 
 // TableName returns the table name for GORM.

@@ -21,11 +21,10 @@ const (
 
 // Common errors returned by data structure methods.
 var (
-	ErrArgument   = errors.New("invalid argument")
-	ErrKeyType    = errors.New("key type mismatch") // the key already exists with a different type
-	ErrNotAllowed = errors.New("operation not allowed")
-	ErrNotFound   = errors.New("key or elem not found")
-	ErrValueType  = errors.New("invalid value type")
+	ErrArgument  = errors.New("invalid argument")
+	ErrKeyType   = errors.New("key type mismatch") // the key already exists with a different type
+	ErrNotFound  = errors.New("key or elem not found")
+	ErrValueType = errors.New("invalid value type")
 )
 
 // Key represents a key data structure.
