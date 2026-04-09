@@ -3,6 +3,7 @@
 package rhash
 
 import (
+	"math/rand"
 	"strconv"
 	"context"
 	"time"
@@ -74,8 +75,9 @@ func New(s *store.Store) *DB {
 // WithDB changes the logical database index in place and returns the same DB.
 // It is safe for concurrent use; each TCP connection has its own DB instance.
 func (d *DB) WithDB(dbIdx int) *DB {
-	d.dbIdx = dbIdx
-	return d
+	newDB := *d
+	newDB.dbIdx = dbIdx
+	return &newDB
 }
 
 // NewTx creates a hash repository transaction
@@ -242,6 +244,23 @@ func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
 func (d *DB) Values(key string) ([]core.Value, error) {
 	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Values(key)
+}
+
+// StrLen returns the length of the value of a field in a hash.
+// If the key or field does not exist, returns 0.
+func (d *DB) StrLen(key, field string) (int, error) {
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.StrLen(key, field)
+}
+
+// RandField returns one or more random fields from a hash.
+// If count is positive, returns up to count random fields (unique).
+// If count is negative, returns |count| random fields (may contain duplicates).
+// If withValues is true, returns field-value pairs; otherwise just fields.
+// If the key does not exist or is not a hash, returns empty slice.
+func (d *DB) RandField(key string, count int, withValues bool) ([]HashItem, error) {
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.RandField(key, count, withValues)
 }
 
 // Tx methods
@@ -969,6 +988,81 @@ func (tx *Tx) Values(key string) ([]core.Value, error) {
 		values[i] = core.Value(v)
 	}
 	return values, nil
+}
+
+// StrLen returns the length of the value of a field in a hash.
+func (tx *Tx) StrLen(key, field string) (int, error) {
+	val, err := tx.Get(key, field)
+	if err != nil {
+		return 0, err
+	}
+	return len(val), nil
+}
+
+// RandField returns one or more random fields from a hash.
+// count > 0: return up to count unique fields
+// count < 0: return |count| fields (may contain duplicates)
+// withValues: include values in the result
+func (tx *Tx) RandField(key string, count int, withValues bool) ([]HashItem, error) {
+	// First get all fields (for small result sets we can do random selection in memory)
+	fields, err := tx.Fields(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
+		return []HashItem{}, nil
+	}
+
+	// If count is negative, we need to allow duplicates (with replacement)
+	if count < 0 {
+		count = -count
+		result := make([]HashItem, count)
+		for i := 0; i < count; i++ {
+			idx := rand.Intn(len(fields))
+			field := fields[idx]
+			var value core.Value
+			if withValues {
+				value, _ = tx.Get(key, field)
+			}
+			result[i] = HashItem{Field: field, Value: value}
+		}
+		return result, nil
+	}
+
+	// For positive count (unique fields), shuffle and take up to count
+	if len(fields) <= count {
+		// Return all fields
+		result := make([]HashItem, len(fields))
+		for i, field := range fields {
+			var value core.Value
+			if withValues {
+				value, _ = tx.Get(key, field)
+			}
+			result[i] = HashItem{Field: field, Value: value}
+		}
+		// Shuffle the result
+		for i := len(result) - 1; i > 0; i-- {
+			j := rand.Intn(i + 1)
+			result[i], result[j] = result[j], result[i]
+		}
+		return result, nil
+	}
+
+	// Fisher-Yates shuffle and take first count
+	for i := len(fields) - 1; i > 0; i-- {
+		j := rand.Intn(i + 1)
+		fields[i], fields[j] = fields[j], fields[i]
+	}
+	result := make([]HashItem, count)
+	for i := 0; i < count; i++ {
+		field := fields[i]
+		var value core.Value
+		if withValues {
+			value, _ = tx.Get(key, field)
+		}
+		result[i] = HashItem{Field: field, Value: value}
+	}
+	return result, nil
 }
 
 // Helper methods

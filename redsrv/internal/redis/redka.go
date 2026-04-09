@@ -23,11 +23,13 @@ type RHash interface {
 	IncrFloat(key, field string, delta float64) (float64, error)
 	Items(key string) (map[string]core.Value, error)
 	Len(key string) (int, error)
+	RandField(key string, count int, withValues bool) ([]rhash.HashItem, error)
 	Scan(key string, cursor int, pattern string, count int) (rhash.ScanResult, error)
 	Scanner(key, pattern string, pageSize int) *rhash.Scanner
 	Set(key, field string, value any) (bool, error)
 	SetMany(key string, items map[string]any) (int, error)
 	SetNotExists(key, field string, value any) (bool, error)
+	StrLen(key, field string) (int, error)
 	Values(key string) ([]core.Value, error)
 }
 
@@ -76,7 +78,9 @@ type RSet interface {
 	Diff(keys ...string) ([]core.Value, error)
 	DiffStore(dest string, keys ...string) (int, error)
 	Exists(key, elem any) (bool, error)
+	ExistsMany(key string, members ...any) ([]bool, error)
 	Inter(keys ...string) ([]core.Value, error)
+	InterCard(limit int, keys ...string) (int, error)
 	InterStore(dest string, keys ...string) (int, error)
 	Items(key string) ([]core.Value, error)
 	Len(key string) (int, error)
@@ -91,13 +95,16 @@ type RSet interface {
 
 // RStr is a string repository.
 type RStr interface {
+	Append(key string, value []byte) (int, error)
 	Get(key string) (core.Value, error)
 	GetMany(keys ...string) (map[string]core.Value, error)
+	GetRange(key string, start, end int) (core.Value, error)
 	Incr(key string, delta int) (int, error)
 	IncrFloat(key string, delta float64) (float64, error)
 	Set(key string, value any) error
 	SetExpire(key string, value any, ttl time.Duration) error
 	SetMany(items map[string]any) error
+	SetRange(key string, offset int, value []byte) (int, error)
 	SetWith(key string, value any) rstring.SetCmd
 }
 

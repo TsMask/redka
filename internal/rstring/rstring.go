@@ -388,6 +388,137 @@ func (tx *Tx) SetWith(key string, value any) SetCmd {
 	return SetCmd{tx: tx, key: key, val: value}
 }
 
+// Append appends the value to the existing string value.
+// Returns the length of the string after appending.
+// If the key does not exist, creates a new string with the value.
+// If the key exists but is not a string, returns ErrKeyType.
+func (d *DB) Append(key string, value []byte) (int, error) {
+	var length int
+	err := d.update(func(tx *Tx) error {
+		var err error
+		length, err = tx.Append(key, value)
+		return err
+	})
+	return length, err
+}
+
+// Append appends the value to the existing string value.
+// Returns the length of the string after appending.
+func (tx *Tx) Append(key string, value []byte) (int, error) {
+	// Get existing value
+	existing, err := tx.get(key)
+	if err != nil && err != core.ErrNotFound {
+		return 0, err
+	}
+
+	// Append new value - convert to []byte to ensure type matching
+	newValue := append([]byte(existing), value...)
+	err = tx.update(key, newValue)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(newValue), nil
+}
+
+// SetRange overwrites the part of the string starting at offset with the value.
+// Returns the length of the string after modification.
+// If the key does not exist, creates a new string filled with zeros
+// (or the equivalent of setting "\x00" repeated offset times).
+// If the offset is beyond the string length, fills with zeros.
+func (d *DB) SetRange(key string, offset int, value []byte) (int, error) {
+	var length int
+	err := d.update(func(tx *Tx) error {
+		var err error
+		length, err = tx.SetRange(key, offset, value)
+		return err
+	})
+	return length, err
+}
+
+// SetRange overwrites the part of the string starting at offset with the value.
+func (tx *Tx) SetRange(key string, offset int, value []byte) (int, error) {
+	if offset < 0 {
+		return 0, core.ErrArgument
+	}
+
+	// Get existing value
+	existing, err := tx.get(key)
+	if err != nil && err != core.ErrNotFound {
+		return 0, err
+	}
+
+	// Convert existing to []byte for proper type handling
+	existingBytes := []byte(existing)
+
+	// Extend string if offset is beyond current length
+	if offset > len(existingBytes) {
+		existingBytes = append(existingBytes, make([]byte, offset-len(existingBytes))...)
+	}
+
+	// Overwrite from offset
+	if offset+len(value) > len(existingBytes) {
+		existingBytes = append(existingBytes[:offset], value...)
+	} else {
+		copy(existingBytes[offset:], value)
+	}
+
+	err = tx.update(key, existingBytes)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(existingBytes), nil
+}
+
+// GetRange returns a substring of the string value.
+// Start and end are zero-based indexes.
+// Negative indexes are counted from the end of the string.
+// end is inclusive.
+// If the key does not exist, returns an empty string.
+func (d *DB) GetRange(key string, start, end int) (core.Value, error) {
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.GetRange(key, start, end)
+}
+
+// GetRange returns a substring of the string value.
+func (tx *Tx) GetRange(key string, start, end int) (core.Value, error) {
+	val, err := tx.get(key)
+	if err != nil && err != core.ErrNotFound {
+		return core.Value(nil), err
+	}
+	if err == core.ErrNotFound {
+		return core.Value(nil), nil
+	}
+
+	// Handle negative indexes
+	length := len(val)
+	if start < 0 {
+		start = length + start
+		if start < 0 {
+			start = 0
+		}
+	}
+	if end < 0 {
+		end = length + end
+		if end < 0 {
+			end = 0
+		}
+	}
+
+	// Clamp end to length
+	if end > length {
+		end = length
+	}
+
+	// Handle empty range
+	if start >= end || start >= length {
+		return core.Value([]byte{}), nil
+	}
+
+	return val[start:end], nil
+}
+
 func (tx *Tx) get(key string) (core.Value, error) {
 	now := time.Now().UnixMilli()
 

@@ -37,18 +37,6 @@ type Store struct {
 	Timeout      time.Duration // transaction timeout
 	MaxPoolConns int           // max connections (0 = auto)
 	MinPoolConns int           // min idle connections (0 = auto)
-	dbIdx        int           // current logical database index (0-15)
-}
-
-// DBIdx returns the current logical database index.
-func (s *Store) DBIdx() int {
-	return s.dbIdx
-}
-
-// SetDBIdx sets the current logical database index.
-// Exported for use by type packages via store.Store.
-func (s *Store) SetDBIdx(idx int) {
-	s.dbIdx = idx
 }
 
 // Open creates a new database handle from a DSN.

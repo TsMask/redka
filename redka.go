@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -83,7 +84,7 @@ var defaultOptions = Options{
 // DB is safe for concurrent use by multiple goroutines as long as you use
 // a single instance of DB throughout your program.
 type DB struct {
-	dbIdx    int           // logical database index; set by WithDB (deprecated, use CtxWithDBIdx)
+	dbIdx    atomic.Int32  // logical database index; thread-safe via atomic operations
 	store    *store.Store
 	act      *store.Transactor[*Tx]
 	hashDB   *rhash.DB
@@ -160,7 +161,6 @@ func new(s *store.Store, opts *Options) (*DB, error) {
 	}
 
 	rdb := &DB{
-		dbIdx:    0,
 		store:    s,
 		act:      store.NewTransactor(s, makeTx),
 		hashDB:   rhash.New(s),
@@ -171,31 +171,29 @@ func new(s *store.Store, opts *Options) (*DB, error) {
 		zsetDB:   rzset.New(s),
 		log:      opts.Logger,
 	}
+	rdb.dbIdx.Store(0)
 	rdb.bg = rdb.startBgManager()
 	return rdb, nil
 }
 
-// WithDB changes the logical database index in place and returns the same DB.
-// It is safe for concurrent use; each TCP connection has its own *DB instance.
+// WithDB returns a new DB instance with the specified database index.
+// All sub-repositories are independently copied with the new index.
+// This method is safe for concurrent use; each call returns an independent instance.
 func (db *DB) WithDB(dbIdx int) *DB {
-	db.dbIdx = dbIdx
-	db.hashDB.WithDB(dbIdx)
-	db.keyDB.WithDB(dbIdx)
-	db.listDB.WithDB(dbIdx)
-	db.setDB.WithDB(dbIdx)
-	db.stringDB.WithDB(dbIdx)
-	db.zsetDB.WithDB(dbIdx)
-	return db
-}
-
-// DBIdx returns the current logical database index.
-func (db *DB) DBIdx() int {
-	return db.dbIdx
-}
-
-// SetDBIdx sets the logical database index.
-func (db *DB) SetDBIdx(dbIdx int) {
-	db.dbIdx = dbIdx
+	newDB := &DB{
+		store:    db.store,
+		act:      db.act,
+		hashDB:   db.hashDB.WithDB(dbIdx),
+		keyDB:    db.keyDB.WithDB(dbIdx),
+		listDB:   db.listDB.WithDB(dbIdx),
+		setDB:    db.setDB.WithDB(dbIdx),
+		stringDB: db.stringDB.WithDB(dbIdx),
+		zsetDB:   db.zsetDB.WithDB(dbIdx),
+		bg:       db.bg,
+		log:      db.log,
+	}
+	newDB.dbIdx.Store(int32(dbIdx))
+	return newDB
 }
 
 // Hash returns the hash repository.

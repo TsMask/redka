@@ -104,12 +104,16 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 		return list.ParseRPush(b)
 
 	// string
+	case "append":
+		return str.ParseAppend(b)
 	case "decr":
 		return str.ParseIncr(b, -1)
 	case "decrby":
 		return str.ParseIncrBy(b, -1)
 	case "get":
 		return str.ParseGet(b)
+	case "getrange":
+		return str.ParseGetrange(b)
 	case "getset":
 		return str.ParseGetSet(b)
 	case "incr":
@@ -130,8 +134,12 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 		return str.ParseSetEX(b, 1000)
 	case "setnx":
 		return str.ParseSetNX(b)
+	case "setrange":
+		return str.ParseSetrange(b)
 	case "strlen":
 		return str.ParseStrlen(b)
+	case "substr":
+		return str.ParseGetrange(b)
 
 	// hash
 	case "hdel":
@@ -160,6 +168,10 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 		return hash.ParseHSet(b)
 	case "hsetnx":
 		return hash.ParseHSetNX(b)
+	case "hrandfield":
+		return hash.ParseHrandfield(b)
+	case "hstrlen":
+		return hash.ParseHstrlen(b)
 	case "hvals":
 		return hash.ParseHVals(b)
 
@@ -174,12 +186,16 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 		return set.ParseSDiffStore(b)
 	case "sinter":
 		return set.ParseSInter(b)
+	case "sintercard":
+		return set.ParseSintercard(b)
 	case "sinterstore":
 		return set.ParseSInterStore(b)
 	case "sismember":
 		return set.ParseSIsMember(b)
 	case "smembers":
 		return set.ParseSMembers(b)
+	case "smismember":
+		return set.ParseSmismember(b)
 	case "smove":
 		return set.ParseSMove(b)
 	case "spop":

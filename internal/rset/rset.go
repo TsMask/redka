@@ -71,8 +71,9 @@ func New(s *store.Store) *DB {
 // WithDB changes the logical database index in place and returns the same DB.
 // It is safe for concurrent use; each TCP connection has its own DB instance.
 func (d *DB) WithDB(dbIdx int) *DB {
-	d.dbIdx = dbIdx
-	return d
+	newDB := *d
+	newDB.dbIdx = dbIdx
+	return &newDB
 }
 
 // NewTx creates a set repository transaction
@@ -169,6 +170,23 @@ func (d *DB) InterStore(dest string, keys ...string) (int, error) {
 		return err
 	})
 	return n, err
+}
+
+// InterCard returns the number of elements in the intersection of multiple sets.
+// InterCard returns the number of elements in the intersection of multiple sets.
+// If limit > 0, the command stops counting once the count reaches the limit.
+// If any source key does not exist or is not a set, returns 0.
+func (d *DB) InterCard(limit int, keys ...string) (int, error) {
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.InterCard(limit, keys...)
+}
+
+// ExistsMany checks if multiple members exist in a set.
+// Returns a slice of booleans indicating existence for each member.
+// If the key does not exist or is not a set, returns all false.
+func (d *DB) ExistsMany(key string, members ...any) ([]bool, error) {
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.ExistsMany(key, members...)
 }
 
 // Items returns all elements in a set.
@@ -968,6 +986,135 @@ func (tx *Tx) InterStore(dest string, keys ...string) (int, error) {
 	})
 
 	return int(n), err
+}
+
+// InterCard returns the number of elements in the intersection of multiple sets.
+// If limit > 0, stops counting once limit is reached.
+func (tx *Tx) InterCard(limit int, keys ...string) (int, error) {
+	if len(keys) < 2 {
+		return 0, nil
+	}
+
+	now := time.Now().UnixMilli()
+
+	// Get kids for all keys
+	var kids []int64
+	err := tx.tx.Model(&store.RKey{}).
+		Where("kdb = ? AND kname IN ? AND ktype = ?", tx.dbIdx, keys, keyTypeSet).
+		Scopes(store.NotExpired(now)).
+		Select("id").
+		Scan(&kids).Error
+	if err != nil {
+		return 0, err
+	}
+
+	// Need all keys to exist
+	if len(kids) < len(keys) {
+		return 0, nil
+	}
+
+	if limit > 0 {
+		// With limit, fetch elements and count until limit
+		type elemResult struct {
+			Elem []byte
+		}
+		var results []elemResult
+		err = tx.tx.Model(&store.RSet{}).
+			Select("elem").
+			Where("kid IN ?", kids).
+			Group("elem").
+			Having("COUNT(DISTINCT kid) = ?", len(keys)).
+			Limit(limit).
+			Scan(&results).Error
+		if err != nil {
+			return 0, err
+		}
+		return len(results), nil
+	}
+
+	// Without limit, count all intersection elements
+	// Use a subquery to correctly count the intersection cardinality
+	type countResult struct {
+		Count int
+	}
+	var result countResult
+
+	err = tx.tx.Raw(`
+		SELECT COUNT(*) as count FROM (
+			SELECT elem FROM rset
+			WHERE kid IN ?
+			GROUP BY elem
+			HAVING COUNT(DISTINCT kid) = ?
+		) AS intersection
+	`, kids, len(keys)).Scan(&result).Error
+	if err != nil {
+		return 0, err
+	}
+	return result.Count, nil
+}
+
+// ExistsMany checks if multiple members exist in a set.
+// Returns a slice of booleans for each member.
+func (tx *Tx) ExistsMany(key string, members ...any) ([]bool, error) {
+	if len(members) == 0 {
+		return []bool{}, nil
+	}
+
+	now := time.Now().UnixMilli()
+
+	// Get the key
+	var rkey store.RKey
+	err := tx.tx.Model(&store.RKey{}).
+		Where("kdb = ? AND kname = ? AND ktype = ?", tx.dbIdx, key, keyTypeSet).
+		Scopes(store.NotExpired(now)).
+		Select("id").
+		First(&rkey).Error
+	if err == gorm.ErrRecordNotFound {
+		// Key doesn't exist, return all false
+		result := make([]bool, len(members))
+		return result, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert members to bytes
+	elems := make([][]byte, len(members))
+	for i, m := range members {
+		elemb, err := core.ToBytes(m)
+		if err != nil {
+			return nil, err
+		}
+		elems[i] = elemb
+	}
+
+	// Batch check existence
+	type existResult struct {
+		Elem  []byte
+		Count int64
+	}
+	var results []existResult
+	err = tx.tx.Model(&store.RSet{}).
+		Select("elem, COUNT(*) as count").
+		Where("kid = ? AND elem IN ?", rkey.ID, elems).
+		Group("elem").
+		Scan(&results).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// Build existence map
+	existMap := make(map[string]bool, len(results))
+	for _, r := range results {
+		existMap[string(r.Elem)] = true
+	}
+
+	// Build result
+	result := make([]bool, len(members))
+	for i, elem := range elems {
+		result[i] = existMap[string(elem)]
+	}
+	return result, nil
 }
 
 // Move removes an element from one set and adds it to another.
