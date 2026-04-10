@@ -84,7 +84,7 @@ var defaultOptions = Options{
 // DB is safe for concurrent use by multiple goroutines as long as you use
 // a single instance of DB throughout your program.
 type DB struct {
-	dbIdx    atomic.Int32  // logical database index; thread-safe via atomic operations
+	dbIdx    atomic.Int32 // logical database index; thread-safe via atomic operations
 	store    *store.Store
 	act      *store.Transactor[*Tx]
 	hashDB   *rhash.DB
@@ -279,17 +279,12 @@ func (db *DB) Close() error {
 
 // startBgManager starts the goroutine that runs
 // in the background and deletes expired keys.
-// Triggers every 60 seconds, deletes up all expired keys.
+// Triggers every 60 seconds, deletes up maxBatch expired keys per iteration.
+// This prevents long-running deletes from blocking concurrent write operations.
 // Returns a stop function to cleanly shut down the goroutine.
 func (db *DB) startBgManager() func() {
-	// TODO: needs further investigation. Deleting all keys may be expensive
-	// and lead to timeouts for concurrent write operations.
-	// Adaptive limits based on the number of changed keys may be a solution.
-	// (see https://redis.io/docs/management/config-file/ > SNAPSHOTTING)
-	// And it doesn't help that SQLite's drivers do not support DELETE LIMIT,
-	// so we have to use DELETE IN (SELECT ...), which is more expensive.
 	const interval = 60 * time.Second
-	const nKeys = 0
+	const maxBatch = 100 // Delete at most 100 keys per iteration to avoid long locks
 
 	ticker := time.NewTicker(interval)
 	quit := make(chan struct{})
@@ -297,11 +292,24 @@ func (db *DB) startBgManager() func() {
 		for {
 			select {
 			case <-ticker.C:
-				count, err := db.keyDB.DeleteExpired(nKeys)
-				if err != nil {
-					db.log.Error("bg: delete expired keys", "error", err)
-				} else if count > 0 {
-					db.log.Info("bg: delete expired keys", "count", count)
+				totalDeleted := 0
+				// Keep deleting in batches until no more expired keys
+				for {
+					count, err := db.keyDB.DeleteExpired(maxBatch)
+					if err != nil {
+						db.log.Error("bg: delete expired keys", "error", err)
+						break
+					}
+					totalDeleted += count
+					// If we got fewer than maxBatch, we're done for this cycle
+					if count < maxBatch {
+						break
+					}
+					// Small delay between batches to let other operations proceed
+					time.Sleep(10 * time.Millisecond)
+				}
+				if totalDeleted > 0 {
+					db.log.Info("bg: delete expired keys", "count", totalDeleted)
 				}
 			case <-quit:
 				ticker.Stop()

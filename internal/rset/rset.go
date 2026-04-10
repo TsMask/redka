@@ -4,6 +4,7 @@ package rset
 
 import (
 	"context"
+	"math/rand"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -237,6 +238,15 @@ func (d *DB) Pop(key string) (core.Value, error) {
 func (d *DB) Random(key string) (core.Value, error) {
 	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
 	return tx.Random(key)
+}
+
+// RandMember returns multiple random elements from a set.
+// If count is positive, returns unique elements.
+// If count is negative, allows duplicates.
+// If the key does not exist or is not a set, returns ErrNotFound.
+func (d *DB) RandMember(key string, count int) ([]core.Value, error) {
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.RandMember(key, count)
 }
 
 // Scan iterates over set elements matching pattern.
@@ -1262,6 +1272,52 @@ func (tx *Tx) Random(key string) (core.Value, error) {
 	}
 
 	return core.Value(rset.Elem), nil
+}
+
+// RandMember returns multiple random elements from a set.
+func (tx *Tx) RandMember(key string, count int) ([]core.Value, error) {
+	now := time.Now().UnixMilli()
+
+	var rkey store.RKey
+	err := tx.tx.Model(&store.RKey{}).
+		Where("kdb = ? AND kname = ? AND ktype = ?", tx.dbIdx, key, keyTypeSet).
+		Scopes(store.NotExpired(now)).
+		First(&rkey).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, core.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var rset []store.RSet
+	err = tx.tx.Where("kid = ?", rkey.ID).
+		Scopes(store.RandomOrder(tx.dialect)).
+		Find(&rset).Error
+	if err != nil {
+		return nil, err
+	}
+
+	if len(rset) == 0 {
+		return nil, core.ErrNotFound
+	}
+
+	elems := make([]core.Value, 0, len(rset))
+	for _, v := range rset {
+		elems = append(elems, core.Value(v.Elem))
+	}
+
+	if count > 0 && count < len(elems) {
+		elems = elems[:count]
+	} else if count < 0 && -count < len(elems) {
+		result := make([]core.Value, -count)
+		for i := 0; i < -count; i++ {
+			result[i] = elems[rand.Intn(len(elems))]
+		}
+		return result, nil
+	}
+
+	return elems, nil
 }
 
 // Scanner returns an iterator for set items with elements matching pattern.

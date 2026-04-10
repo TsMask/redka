@@ -600,6 +600,7 @@ func (tx *Tx) GetScore(key string, elem any) (float64, error) {
 
 // Incr increments the score of an element.
 // If the element does not exist, adds it with the incremented score.
+// Uses SELECT FOR UPDATE to prevent race conditions when inserting new elements.
 func (tx *Tx) Incr(key string, elem any, delta float64) (float64, error) {
 	elemb, err := core.ToBytes(elem)
 	if err != nil {
@@ -609,9 +610,13 @@ func (tx *Tx) Incr(key string, elem any, delta float64) (float64, error) {
 
 	var newScore float64
 	err = tx.tx.Transaction(func(txInner *gorm.DB) error {
-		// Get or create the key with type checking
+		// Lock the key row to prevent concurrent modifications
 		var keyMeta store.RKey
-		err := txInner.Where("kname = ?", key).First(&keyMeta).Error
+		err := txInner.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", tx.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&keyMeta).Error
 		switch err {
 		case nil:
 			// Key exists, check type
@@ -619,13 +624,16 @@ func (tx *Tx) Incr(key string, elem any, delta float64) (float64, error) {
 				return core.ErrKeyType
 			}
 			// Update version and mtime
-			txInner.Model(&keyMeta).Updates(map[string]interface{}{
+			if err := txInner.Model(&keyMeta).Updates(map[string]interface{}{
 				"kver":        gorm.Expr("kver + 1"),
 				"modified_at": now,
-			})
+			}).Error; err != nil {
+				return err
+			}
 		case gorm.ErrRecordNotFound:
 			// Create new key
 			keyMeta = store.RKey{
+				KDB:        tx.dbIdx,
 				KName:      key,
 				KType:      5,
 				KVer:       1,
@@ -642,23 +650,22 @@ func (tx *Tx) Incr(key string, elem any, delta float64) (float64, error) {
 		// Get the key ID (for newly created key)
 		if keyMeta.ID == 0 {
 			err = txInner.Model(&store.RKey{}).
-				Where("kname = ?", key).
+				Where("kdb = ? AND kname = ?", tx.dbIdx, key).
 				First(&keyMeta).Error
 			if err != nil {
 				return err
 			}
 		}
 
-		// Try to update existing score
-		result := txInner.Model(&store.RZSet{}).
+		// Lock the element row if it exists (prevents race with INSERT)
+		var existing store.RZSet
+		err = txInner.Model(&store.RZSet{}).
 			Where("kid = ? AND elem = ?", keyMeta.ID, elemb).
-			UpdateColumn("score", gorm.Expr("score + ?", delta))
-		if result.Error != nil {
-			return result.Error
-		}
+			Clauses(store.ForUpdate()).
+			First(&existing).Error
 
-		if result.RowsAffected == 0 {
-			// Element doesn't exist, insert it
+		if err == gorm.ErrRecordNotFound {
+			// Element doesn't exist, insert it with delta as initial score
 			newScore = delta
 			err = txInner.Create(&store.RZSet{
 				KID:   keyMeta.ID,
@@ -669,18 +676,18 @@ func (tx *Tx) Incr(key string, elem any, delta float64) (float64, error) {
 				return err
 			}
 			// Update key length
-			txInner.Model(&store.RKey{}).
+			return txInner.Model(&store.RKey{}).
 				Where("id = ?", keyMeta.ID).
-				UpdateColumn("klen", gorm.Expr("klen + 1"))
-		} else {
-			// Get the new score
-			txInner.Model(&store.RZSet{}).
-				Select("score").
-				Where("kid = ? AND elem = ?", keyMeta.ID, elemb).
-				Scan(&newScore)
+				UpdateColumn("klen", gorm.Expr("klen + 1")).Error
+		} else if err != nil {
+			return err
 		}
 
-		return nil
+		// Element exists - update its score atomically
+		newScore = existing.Score + delta
+		return txInner.Model(&store.RZSet{}).
+			Where("id = ?", existing.ID).
+			UpdateColumn("score", newScore).Error
 	})
 
 	return newScore, err

@@ -40,19 +40,27 @@ func ParseZRange(b redis.BaseCmd) (ZRange, error) {
 func (cmd ZRange) Run(w redis.Writer, red redis.Redka) (any, error) {
 	rang := red.ZSet().RangeWith(cmd.key)
 
-	// filter by score or rank
-	if cmd.byScore {
-		rang = rang.ByScore(cmd.start, cmd.stop)
+	start := int(cmd.start)
+	stop := int(cmd.stop)
+
+	if !cmd.byScore {
+		if stop == -1 {
+			stop = 2147483647
+		} else if stop < -1 {
+			stop = -2
+		}
+		if start < 0 {
+			start = 0
+		}
+		rang = rang.ByRank(start, stop)
 	} else {
-		rang = rang.ByRank(int(cmd.start), int(cmd.stop))
+		rang = rang.ByScore(cmd.start, cmd.stop)
 	}
 
-	// sort direction
 	if cmd.rev {
 		rang = rang.Desc()
 	}
 
-	// limit and offset
 	if cmd.offset > 0 {
 		rang = rang.Offset(cmd.offset)
 	}
@@ -60,14 +68,12 @@ func (cmd ZRange) Run(w redis.Writer, red redis.Redka) (any, error) {
 		rang = rang.Count(cmd.count)
 	}
 
-	// run the command
 	items, err := rang.Run()
 	if err != nil {
 		w.WriteError(cmd.Error(err))
 		return nil, err
 	}
 
-	// write the response with/without scores
 	if cmd.withScores {
 		w.WriteArray(len(items) * 2)
 		for _, item := range items {

@@ -3,8 +3,9 @@
 package rstring
 
 import (
-	"errors"
 	"context"
+	"errors"
+	"strconv"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -176,27 +177,96 @@ func (tx *Tx) GetMany(keys ...string) (map[string]core.Value, error) {
 // If the key does not exist, sets it to 0 before the increment.
 // If the key value is not an integer, returns ErrValueType.
 // If the key exists but is not a string, returns ErrKeyType.
+//
+// Uses SELECT FOR UPDATE to prevent race conditions in concurrent access.
 func (tx *Tx) Incr(key string, delta int) (int, error) {
-	// get the current value
-	val, err := tx.Get(key)
-	if err != nil && err != core.ErrNotFound {
-		return 0, err
-	}
+	now := time.Now().UnixMilli()
 
-	// check if the value is a valid integer
-	valInt, err := val.Int()
-	if err != nil {
-		return 0, core.ErrValueType
-	}
+	var newVal int
+	err := tx.tx.Transaction(func(txInner *gorm.DB) error {
+		// Lock the key row to prevent concurrent modifications (SELECT FOR UPDATE)
+		var rkey store.RKey
+		err := txInner.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", tx.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			 Clauses(store.ForUpdate()).
+			First(&rkey).Error
+		if err == gorm.ErrRecordNotFound {
+			// Key doesn't exist - create it with value = delta
+			rkey = store.RKey{
+				KDB:        tx.dbIdx,
+				KName:      key,
+				KType:      1, // string type
+				KVer:       1,
+				ModifiedAt: now,
+				KLen:       1,
+			}
+			if err := txInner.Create(&rkey).Error; err != nil {
+				return err
+			}
+			newVal = delta
+			// Create string value
+			rstr := store.RString{
+				KID:  rkey.ID,
+				KVal: []byte(strconv.Itoa(delta)),
+			}
+			return txInner.Create(&rstr).Error
+		}
+		if err != nil {
+			return err
+		}
 
-	// increment the value
-	newVal := valInt + delta
-	err = tx.update(key, newVal)
-	if err != nil {
-		return 0, err
-	}
+		// Check type
+		if rkey.KType != 1 {
+			return core.ErrKeyType
+		}
 
-	return newVal, nil
+		// Get current value with lock
+		var rstr store.RString
+		err = txInner.Where("kid = ?", rkey.ID).First(&rstr).Error
+		if err == gorm.ErrRecordNotFound {
+			// No string value yet - create with delta
+			newVal = delta
+			rstr := store.RString{
+				KID:  rkey.ID,
+				KVal: []byte(strconv.Itoa(delta)),
+			}
+			if err := txInner.Create(&rstr).Error; err != nil {
+				return err
+			}
+			// Update key metadata
+			return txInner.Model(&store.RKey{}).
+				Where("id = ?", rkey.ID).
+				Updates(map[string]interface{}{
+					"kver":        gorm.Expr("kver + 1"),
+					"modified_at": now,
+				}).Error
+		}
+		if err != nil {
+			return err
+		}
+
+		// Parse and increment
+		valInt, err := strconv.Atoi(string(rstr.KVal))
+		if err != nil {
+			return core.ErrValueType
+		}
+		newVal = valInt + delta
+
+		// Update value and key metadata atomically
+		rstr.KVal = []byte(strconv.Itoa(newVal))
+		if err := txInner.Save(&rstr).Error; err != nil {
+			return err
+		}
+		return txInner.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"kver":        gorm.Expr("kver + 1"),
+				"modified_at": now,
+			}).Error
+	})
+
+	return newVal, err
 }
 
 // IncrFloat increments the float key value by the specified amount.
@@ -205,26 +275,93 @@ func (tx *Tx) Incr(key string, delta int) (int, error) {
 // If the key value is not an float, returns ErrValueType.
 // If the key exists but is not a string, returns ErrKeyType.
 func (tx *Tx) IncrFloat(key string, delta float64) (float64, error) {
-	// get the current value
-	val, err := tx.Get(key)
-	if err != nil && err != core.ErrNotFound {
-		return 0, err
-	}
+	now := time.Now().UnixMilli()
 
-	// check if the value is a valid float
-	valFloat, err := val.Float()
-	if err != nil {
-		return 0, core.ErrValueType
-	}
+	var newVal float64
+	err := tx.tx.Transaction(func(txInner *gorm.DB) error {
+		// Lock the key row to prevent concurrent modifications (SELECT FOR UPDATE)
+		var rkey store.RKey
+		err := txInner.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", tx.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&rkey).Error
+		if err == gorm.ErrRecordNotFound {
+			// Key doesn't exist - create it with value = delta
+			rkey = store.RKey{
+				KDB:        tx.dbIdx,
+				KName:      key,
+				KType:      1, // string type
+				KVer:       1,
+				ModifiedAt: now,
+				KLen:       1,
+			}
+			if err := txInner.Create(&rkey).Error; err != nil {
+				return err
+			}
+			newVal = delta
+			// Create string value
+			rstr := store.RString{
+				KID:  rkey.ID,
+				KVal: []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
+			}
+			return txInner.Create(&rstr).Error
+		}
+		if err != nil {
+			return err
+		}
 
-	// increment the value
-	newVal := valFloat + delta
-	err = tx.update(key, newVal)
-	if err != nil {
-		return 0, err
-	}
+		// Check type
+		if rkey.KType != 1 {
+			return core.ErrKeyType
+		}
 
-	return newVal, nil
+		// Get current value with lock
+		var rstr store.RString
+		err = txInner.Where("kid = ?", rkey.ID).First(&rstr).Error
+		if err == gorm.ErrRecordNotFound {
+			// No string value yet - create with delta
+			newVal = delta
+			rstr := store.RString{
+				KID:  rkey.ID,
+				KVal: []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
+			}
+			if err := txInner.Create(&rstr).Error; err != nil {
+				return err
+			}
+			// Update key metadata
+			return txInner.Model(&store.RKey{}).
+				Where("id = ?", rkey.ID).
+				Updates(map[string]interface{}{
+					"kver":        gorm.Expr("kver + 1"),
+					"modified_at": now,
+				}).Error
+		}
+		if err != nil {
+			return err
+		}
+
+		// Parse and increment
+		valFloat, err := strconv.ParseFloat(string(rstr.KVal), 64)
+		if err != nil {
+			return core.ErrValueType
+		}
+		newVal = valFloat + delta
+
+		// Update value and key metadata atomically
+		rstr.KVal = []byte(strconv.FormatFloat(newVal, 'f', -1, 64))
+		if err := txInner.Save(&rstr).Error; err != nil {
+			return err
+		}
+		return txInner.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"kver":        gorm.Expr("kver + 1"),
+				"modified_at": now,
+			}).Error
+	})
+
+	return newVal, err
 }
 
 // Set sets the key value that will not expire.

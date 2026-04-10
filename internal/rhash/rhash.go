@@ -686,11 +686,16 @@ func (tx *Tx) Incr(key, field string, delta int) (int, error) {
 	var newVal int
 	var isNewField bool
 	err := tx.tx.Transaction(func(txInner *gorm.DB) error {
-		// Create or update the key
+		// Lock the key row to prevent concurrent modifications
 		var rkey store.RKey
-		err := txInner.Where("kdb = ? AND kname = ?", tx.dbIdx, key).First(&rkey).Error
+		err := txInner.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", tx.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&rkey).Error
+
 		if err == gorm.ErrRecordNotFound {
-			// Create new key
+			// Key doesn't exist - create new key
 			rkey = store.RKey{
 				KDB:        tx.dbIdx,
 				KName:      key,
@@ -705,7 +710,7 @@ func (tx *Tx) Incr(key, field string, delta int) (int, error) {
 		} else if err != nil {
 			return err
 		} else {
-			// Check type and update
+			// Key exists, check type
 			if rkey.KType != 4 {
 				return core.ErrKeyType
 			}
@@ -728,9 +733,12 @@ func (tx *Tx) Incr(key, field string, delta int) (int, error) {
 			}
 		}
 
-		// Try to get existing value
+		// Lock the hash field row and get existing value
 		var existing store.RHash
-		err = txInner.Where("kid = ? AND kfield = ?", rkey.ID, field).First(&existing).Error
+		err = txInner.Model(&store.RHash{}).
+			Where("kid = ? AND kfield = ?", rkey.ID, field).
+			Clauses(store.ForUpdate()).
+			First(&existing).Error
 
 		var newValue int64
 		switch err {
@@ -785,11 +793,16 @@ func (tx *Tx) IncrFloat(key, field string, delta float64) (float64, error) {
 	var newVal float64
 	var isNewField bool
 	err := tx.tx.Transaction(func(txInner *gorm.DB) error {
-		// Create or update the key
+		// Lock the key row to prevent concurrent modifications
 		var rkey store.RKey
-		err := txInner.Where("kdb = ? AND kname = ?", tx.dbIdx, key).First(&rkey).Error
+		err := txInner.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", tx.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&rkey).Error
+
 		if err == gorm.ErrRecordNotFound {
-			// Create new key
+			// Key doesn't exist - create new key
 			rkey = store.RKey{
 				KDB:        tx.dbIdx,
 				KName:      key,
@@ -804,7 +817,7 @@ func (tx *Tx) IncrFloat(key, field string, delta float64) (float64, error) {
 		} else if err != nil {
 			return err
 		} else {
-			// Check type and update
+			// Key exists, check type
 			if rkey.KType != 4 {
 				return core.ErrKeyType
 			}
@@ -827,9 +840,12 @@ func (tx *Tx) IncrFloat(key, field string, delta float64) (float64, error) {
 			}
 		}
 
-		// Try to get existing value
+		// Lock the hash field row and get existing value
 		var existing store.RHash
-		err = txInner.Where("kid = ? AND kfield = ?", rkey.ID, field).First(&existing).Error
+		err = txInner.Model(&store.RHash{}).
+			Where("kid = ? AND kfield = ?", rkey.ID, field).
+			Clauses(store.ForUpdate()).
+			First(&existing).Error
 
 		var newValue float64
 		switch err {

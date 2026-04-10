@@ -87,6 +87,7 @@ type RSet interface {
 	Move(src, dest string, elem any) (bool, error)
 	Pop(key string) (core.Value, error)
 	Random(key string) (core.Value, error)
+	RandMember(key string, count int) ([]core.Value, error)
 	Scan(key string, cursor int, pattern string, count int) (rset.ScanResult, error)
 	Scanner(key, pattern string, pageSize int) *rset.Scanner
 	Union(keys ...string) ([]core.Value, error)
