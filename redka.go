@@ -2,7 +2,6 @@ package redka
 
 import (
 	"context"
-	"database/sql"
 	"io"
 	"log/slog"
 	"strings"
@@ -18,9 +17,6 @@ import (
 	"github.com/tsmask/redka/internal/rzset"
 	"github.com/tsmask/redka/internal/store"
 
-	"gorm.io/driver/mysql"
-	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -119,26 +115,6 @@ func Open(path string, opts *Options) (*DB, error) {
 		return nil, err
 	}
 
-	return new(sdb, opts)
-}
-
-// OpenDB connects to an existing SQL database.
-// Creates the database schema if necessary.
-// The opts parameter is optional. If nil, uses default options.
-func OpenDB(db *sql.DB, opts *Options) (*DB, error) {
-	opts = applyOptions(defaultOptions, opts)
-	sopts := newStoreOptions(opts)
-
-	// Convert sql.DB to GORM instance
-	gormDB, err := gormOpen(db, sopts.Dialect)
-	if err != nil {
-		return nil, err
-	}
-
-	sdb, err := store.OpenDB(gormDB, sopts.Dialect, sopts.Timeout)
-	if err != nil {
-		return nil, err
-	}
 	return new(sdb, opts)
 }
 
@@ -481,26 +457,4 @@ func postgresDSN(path string, _ map[string]string) string {
 // mysqlDSN builds a MySQL DSN.
 func mysqlDSN(path string, _ map[string]string) string {
 	return path
-}
-
-// gormOpen opens a GORM connection from an existing sql.DB.
-func gormOpen(db *sql.DB, dialect store.Dialect) (*gorm.DB, error) {
-	sqlDB, err := db.Conn(context.Background())
-	if err != nil {
-		return nil, err
-	}
-
-	var dialector gorm.Dialector
-	switch dialect {
-	case store.DialectSQLite:
-		dialector = sqlite.New(sqlite.Config{Conn: sqlDB})
-	case store.DialectPostgres:
-		dialector = postgres.New(postgres.Config{Conn: sqlDB})
-	case store.DialectMySQL:
-		dialector = mysql.New(mysql.Config{Conn: sqlDB})
-	default:
-		return nil, store.ErrDialect
-	}
-
-	return gorm.Open(dialector, &gorm.Config{PrepareStmt: true})
 }

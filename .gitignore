@@ -26,6 +26,7 @@ go.work
 go.work.sum
 build/
 config.mysql.yaml
+__debug_*
 
 # env file
 .env

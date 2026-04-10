@@ -650,11 +650,12 @@ func (tx *Tx) GetRange(key string, start, end int) (core.Value, error) {
 	}
 
 	// Handle empty range
+	// Note: Redis GETRANGE uses inclusive end, so add 1
 	if start >= end || start >= length {
 		return core.Value([]byte{}), nil
 	}
 
-	return val[start:end], nil
+	return val[start : end+1], nil
 }
 
 func (tx *Tx) get(key string) (core.Value, error) {

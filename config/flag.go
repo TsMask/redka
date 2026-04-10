@@ -12,11 +12,11 @@ import (
 // FlagConfig reads the configuration from
 // command line arguments and environment variables.
 func FlagConfig() *ServerConfig {
-	config := DefaultConfig()
+	cfg := DefaultConfig()
 	var portStr string
 	var configFile string
 	flag.StringVar(
-		&config.Host, "h",
+		&cfg.Host, "h",
 		cmp.Or(os.Getenv("REDKA_HOST"), "localhost"),
 		"server host",
 	)
@@ -26,12 +26,12 @@ func FlagConfig() *ServerConfig {
 		"server port",
 	)
 	flag.StringVar(
-		&config.Sock, "s",
+		&cfg.Sock, "s",
 		cmp.Or(os.Getenv("REDKA_SOCK"), ""),
 		"server socket (overrides host and port)",
 	)
 	flag.StringVar(
-		&config.Password, "a",
+		&cfg.Password, "a",
 		cmp.Or(os.Getenv("REDKA_PASSWORD"), ""),
 		"require clients to authenticate with this password",
 	)
@@ -40,10 +40,10 @@ func FlagConfig() *ServerConfig {
 		"",
 		"configuration file path (YAML format)",
 	)
-	flag.BoolVar(&config.Verbose, "v", false, "verbose logging")
+	flag.BoolVar(&cfg.Verbose, "v", false, "verbose logging")
 	flag.Parse()
 	// Parse port
-	config.Port = parsePortOrExit(portStr)
+	cfg.Port = parsePortOrExit(portStr)
 
 	// Load configuration from file if specified
 	if configFile != "" {
@@ -53,27 +53,20 @@ func FlagConfig() *ServerConfig {
 			os.Exit(1)
 		}
 		// Command line arguments override file config
-		if config.Host != "localhost" || os.Getenv("REDKA_HOST") != "" {
-			fileConfig.Host = config.Host
+		if v := os.Getenv("REDKA_HOST"); v != "" {
+			fileConfig.Host = v
 		}
-		if portStr != "6379" || os.Getenv("REDKA_PORT") != "" {
-			fileConfig.Port = parsePortOrExit(portStr)
+		if v := os.Getenv("REDKA_PORT"); v != "" {
+			fileConfig.Port = parsePortOrExit(v)
 		}
-		if config.Sock != "" || os.Getenv("REDKA_SOCK") != "" {
-			fileConfig.Sock = cmp.Or(config.Sock, os.Getenv("REDKA_SOCK"))
+		if v := os.Getenv("REDKA_SOCK"); v != "" {
+			fileConfig.Sock = v
 		}
-		if config.Password != "" || os.Getenv("REDKA_PASSWORD") != "" {
-			fileConfig.Password = cmp.Or(config.Password, os.Getenv("REDKA_PASSWORD"))
+		if v := os.Getenv("REDKA_PASSWORD"); v != "" {
+			fileConfig.Password = v
 		}
-		if config.Verbose {
-			fileConfig.Verbose = true
-		}
-		// Sync log_file from file config
-		if fileConfig.LogFile != "" && config.LogFile == "" {
-			config.LogFile = fileConfig.LogFile
-		}
-		if config.DBDSN != "" || os.Getenv("REDKA_DB_DSN") != "" {
-			fileConfig.DBDSN = cmp.Or(config.DBDSN, os.Getenv("REDKA_DB_DSN"))
+		if v := os.Getenv("REDKA_DB_DSN"); v != "" {
+			fileConfig.DBDSN = v
 		}
 
 		// Validate and use file config
@@ -81,16 +74,10 @@ func FlagConfig() *ServerConfig {
 			slog.Error("Invalid configuration", "error", err)
 			os.Exit(1)
 		}
-
-		config.Host = fileConfig.Host
-		config.Port = fileConfig.Port
-		config.Sock = fileConfig.Sock
-		config.Password = fileConfig.Password
-		config.Verbose = fileConfig.Verbose
-		config.DBDSN = fileConfig.DBDSN
+		cfg = fileConfig
 	}
 
-	return config
+	return cfg
 }
 
 // parsePortOrExit parses a port string to an integer.

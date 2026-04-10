@@ -3,7 +3,6 @@ package config
 
 import (
 	"log/slog"
-	"net/url"
 	"os"
 
 	"github.com/tsmask/redka"
@@ -26,13 +25,7 @@ func OpenDB(cfg *ServerConfig, logger *slog.Logger) *redka.DB {
 		os.Exit(1)
 	}
 
-	// Hide password when logging.
-	maskedPath := cfg.DBDSN
-	if u, err := url.Parse(maskedPath); err == nil && u.User != nil {
-		u.User = url.User(u.User.Username())
-		maskedPath = u.String()
-	}
-	slog.Info("data source", "driver", driverName, "path", maskedPath)
+	slog.Info("data source", "driver", driverName)
 
 	return db
 }

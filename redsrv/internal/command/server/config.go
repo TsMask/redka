@@ -1,6 +1,8 @@
 package server
 
 import (
+	"strings"
+
 	"github.com/tsmask/redka/redsrv/internal/redis"
 )
 
@@ -19,13 +21,13 @@ func ParseConfig(b redis.BaseCmd) (Config, error) {
 	if len(cmd.Args()) == 0 {
 		return Config{}, redis.ErrInvalidArgNum
 	}
-	cmd.subcmd = string(cmd.Args()[0])
+	cmd.subcmd = strings.ToUpper(string(cmd.Args()[0]))
 
 	// Parse the subcommand.
 	var err error
 	args := cmd.Args()[1:]
 	switch cmd.subcmd {
-	case "get":
+	case "GET":
 		cmd.get, err = ParseConfigGet(args)
 	default:
 		err = redis.ErrUnknownSubcmd
@@ -40,7 +42,7 @@ func ParseConfig(b redis.BaseCmd) (Config, error) {
 
 func (c Config) Run(w redis.Writer, red redis.Redka) (any, error) {
 	switch c.subcmd {
-	case "get":
+	case "GET":
 		return c.get.Run(w, red)
 	default:
 		w.WriteString("OK")
