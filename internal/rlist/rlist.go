@@ -980,9 +980,28 @@ func (tx *Tx) insert(key string, pivot any, elem any, after bool) (int, error) {
 		} else {
 			// Use midpoint between prev and pivot (avoids collision with existing)
 			newPos = prevElem.Pos + (pivotElem.Pos-prevElem.Pos)/2
-			// If they're adjacent integers, fall back to pivot-1
-			if newPos == pivotElem.Pos {
-				newPos = pivotElem.Pos - 1
+			// If midpoint equals prev (adjacent positions), there's no room
+			// Renumber all elements with large gaps for future insertions
+			if newPos == prevElem.Pos {
+				// Find all elements ordered by position
+				var elems []store.RList
+				tx.tx.Where("kid = ?", rkey.ID).Order("pos ASC").Find(&elems)
+				
+				// Renumber with large gaps: new_pos = (index + 1) * 1000
+				// This gives positions 1000, 2000, 3000... leaving huge room
+				// Insert BEFORE the pivot by using (pivot_index) * 1000 - 500
+				for i, elem := range elems {
+					newListPos := int64((i + 1) * 1000) // 1000, 2000, 3000...
+					err = tx.tx.Exec(`UPDATE rlist SET pos = ? WHERE id = ?`, newListPos, elem.ID).Error
+					if err != nil {
+						return 0, err
+					}
+					// Track the pivot's new position to insert before it
+					if elem.ID == pivotElem.ID {
+						// Insert 500 before the pivot's new position
+						newPos = int64((i + 1) * 1000 - 500)
+					}
+				}
 			}
 		}
 	}

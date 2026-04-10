@@ -36,8 +36,9 @@ func New(s *store.Store) *DB {
 // WithDB changes the logical database index in place and returns the same DB.
 // It is safe for concurrent use; each TCP connection has its own DB instance.
 func (d *DB) WithDB(dbIdx int) *DB {
-	d.dbIdx = dbIdx
-	return d
+	newDB := *d
+	newDB.dbIdx = dbIdx
+	return &newDB
 }
 
 // Get returns the value of the key.
