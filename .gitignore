@@ -26,6 +26,8 @@ go.work
 go.work.sum
 build/
 config.mysql.yaml
+config.postgres.yaml
+config.sqlite.yaml
 __debug_*
 
 # env file

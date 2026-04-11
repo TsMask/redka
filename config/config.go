@@ -117,8 +117,8 @@ func (c *ServerConfig) Address() string {
 // InferDriverName infers the database driver name from the DSN prefix.
 func InferDriverName(dsn string) string {
 
-	// PostgreSQL: postgres:// or postgresql://
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+	// PostgreSQL: postgres:// or postgresql:// or pgx://
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") || strings.HasPrefix(dsn, "pgx://") {
 		return "postgres"
 	}
 

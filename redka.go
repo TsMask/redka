@@ -451,10 +451,18 @@ func sqliteDSN(path string, pragma map[string]string) string {
 
 // postgresDSN builds a PostgreSQL DSN.
 func postgresDSN(path string, _ map[string]string) string {
+	if strings.HasPrefix(path, "pgx://") {
+		path = strings.Replace(path, "pgx://", "postgres://", 1)
+	}
 	return path
 }
 
 // mysqlDSN builds a MySQL DSN.
 func mysqlDSN(path string, _ map[string]string) string {
+	if strings.HasPrefix(path, "mysql://") {
+		path = path[8:]
+	} else if strings.HasPrefix(path, "mariadb://") {
+		path = path[10:]
+	}
 	return path
 }

@@ -54,3 +54,27 @@ postgres-stop:
 
 postgres-shell:
 	@docker exec -it redka-postgres psql --username=redka --dbname=redka
+
+mysql-start:
+	@echo "> starting mysql..."
+	@docker run --rm --detach --name=redka-mysql \
+		--env=MYSQL_ROOT_PASSWORD=redka \
+		--env=MYSQL_DATABASE=redka \
+		--env=MYSQL_USER=redka \
+		--env=MYSQL_PASSWORD=redka \
+		--publish=3306:3306 \
+		--tmpfs /var/lib/mysql \
+		mysql:8.0
+	@until docker exec redka-mysql \
+		mysqladmin ping --silent --host=localhost --user=root --password=redka 2>/dev/null; \
+		do sleep 1; done
+	@echo "✓ started mysql"
+
+mysql-stop:
+	@echo "> stopping mysql..."
+	@docker stop redka-mysql
+	@echo "✓ stopped mysql"
+
+mysql-shell:
+	@docker exec -it redka-mysql mysql --user=redka --password=redka --database=redka
+	
