@@ -33,14 +33,14 @@ You can also run Redka with Docker as follows:
 
 ```shell
 # In-memory sqlite database.
-docker run --rm -p 6379:6379 nalgeon/redka
+docker run --rm -p 6379:6379 tsmask/redka
 
 # Persistent sqlite database
 # using the /path/to/data host directory.
-docker run --rm -p 6379:6379 -v /path/to/data:/data nalgeon/redka redka.db
+docker run --rm -p 6379:6379 -v /path/to/data:/data tsmask/redka redka.db
 
 # Postgres database on host machine.
-docker run --rm -p 6379:6379 nalgeon/redka "postgres://redka:redka@host.docker.internal:5432/redka?sslmode=disable"
+docker run --rm -p 6379:6379 tsmask/redka "postgres://redka:redka@host.docker.internal:5432/redka?sslmode=disable"
 ```
 
 Server defaults in Docker are host `0.0.0.0`, port `6379` and empty DB path.

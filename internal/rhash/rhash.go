@@ -5,7 +5,6 @@ package rhash
 import (
 	"math/rand"
 	"strconv"
-	"context"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -35,9 +34,8 @@ const scanPageSize = 10
 // Use the hash repository to work with individual hashmaps
 // and their fields.
 type DB struct {
-	store  *store.Store
-	update func(f func(tx *Tx) error) error
-	dbIdx  int
+	store *store.Store
+	dbIdx int
 }
 
 // Tx is a hash repository transaction.
@@ -64,12 +62,7 @@ type Scanner struct {
 // New connects to the hash repository.
 // Does not create the database schema.
 func New(s *store.Store) *DB {
-	d := &DB{store: s, dbIdx: 0}
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
-		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
-	}
-	d.update = store.NewTransactor(s, newTxFn).Update
-	return d
+	return &DB{store: s, dbIdx: 0}
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -91,13 +84,8 @@ func NewTx(dialect store.Dialect, tx *gorm.DB, dbIdx int) *Tx {
 // Ignores non-existing fields.
 // Does nothing if the key does not exist or is not a hash.
 func (d *DB) Delete(key string, fields ...string) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.Delete(key, fields...)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Delete(key, fields...)
 }
 
 // Exists checks if a field exists in a hash.
@@ -137,13 +125,8 @@ func (d *DB) GetMany(key string, fields ...string) (map[string]core.Value, error
 // If the key does not exist, creates it.
 // If the key exists but is not a hash, returns ErrKeyType.
 func (d *DB) Incr(key, field string, delta int) (int, error) {
-	var val int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		val, err = tx.Incr(key, field, delta)
-		return err
-	})
-	return val, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Incr(key, field, delta)
 }
 
 // IncrFloat increments the float value of a field in a hash.
@@ -153,13 +136,8 @@ func (d *DB) Incr(key, field string, delta int) (int, error) {
 // If the key does not exist, creates it.
 // If the key exists but is not a hash, returns ErrKeyType.
 func (d *DB) IncrFloat(key, field string, delta float64) (float64, error) {
-	var val float64
-	err := d.update(func(tx *Tx) error {
-		var err error
-		val, err = tx.IncrFloat(key, field, delta)
-		return err
-	})
-	return val, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.IncrFloat(key, field, delta)
 }
 
 // Items returns a map of all fields and values in a hash.
@@ -202,13 +180,8 @@ func (d *DB) Scanner(key, pattern string, pageSize int) *Scanner {
 // If the key does not exist, creates it.
 // If the key exists but is not a hash, returns ErrKeyType.
 func (d *DB) Set(key, field string, value any) (bool, error) {
-	var created bool
-	err := d.update(func(tx *Tx) error {
-		var err error
-		created, err = tx.Set(key, field, value)
-		return err
-	})
-	return created, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Set(key, field, value)
 }
 
 // SetMany creates or updates the values of multiple fields in a hash.
@@ -216,13 +189,8 @@ func (d *DB) Set(key, field string, value any) (bool, error) {
 // If the key does not exist, creates it.
 // If the key exists but is not a hash, returns ErrKeyType.
 func (d *DB) SetMany(key string, items map[string]any) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.SetMany(key, items)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.SetMany(key, items)
 }
 
 // SetNotExists creates the value of a field in a hash if it does not exist.
@@ -230,13 +198,8 @@ func (d *DB) SetMany(key string, items map[string]any) (int, error) {
 // If the key does not exist, creates it.
 // If the key exists but is not a hash, returns ErrKeyType.
 func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
-	var created bool
-	err := d.update(func(tx *Tx) error {
-		var err error
-		created, err = tx.SetNotExists(key, field, value)
-		return err
-	})
-	return created, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.SetNotExists(key, field, value)
 }
 
 // Values returns all values in a hash.

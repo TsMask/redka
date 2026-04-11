@@ -2,13 +2,14 @@ package store
 
 import (
 	"strings"
+	"time"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
 // newMySQL creates a new MySQL database handle using GORM.
-func newMySQL(dsn string, opts *Options) (*Store, error) {
+func newMySQL(dsn string) (*Store, error) {
 	dsn = mysqlDataSource(dsn)
 
 	// Open the database connection
@@ -18,11 +19,8 @@ func newMySQL(dsn string, opts *Options) (*Store, error) {
 	}
 
 	store := &Store{
-		Dialect:      DialectMySQL,
-		DB:           db,
-		Timeout:      opts.Timeout,
-		MaxPoolConns: opts.MaxPoolConns,
-		MinPoolConns: opts.MinPoolConns,
+		Dialect: DialectMySQL,
+		DB:      db,
 	}
 
 	// Configure connection pool
@@ -35,21 +33,14 @@ func newMySQL(dsn string, opts *Options) (*Store, error) {
 
 // configurePool sets the number of connections for MySQL.
 func (s *Store) configurePool() error {
-	maxConns := s.MaxPoolConns
-	if maxConns == 0 {
-		maxConns = suggestNumConns()
-	}
-	minIdle := s.MinPoolConns
-	if minIdle == 0 {
-		minIdle = 2
-	}
-
 	sqlDB, err := s.DB.DB()
 	if err != nil {
 		return err
 	}
-	configurePool(sqlDB, maxConns, minIdle)
-
+	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute) // Prevent stale connections
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Reclaim idle connections
 	return nil
 }
 

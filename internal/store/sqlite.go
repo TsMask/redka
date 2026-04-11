@@ -3,6 +3,7 @@ package store
 import (
 	"net/url"
 	"strings"
+	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -18,8 +19,8 @@ var sqlitePragma = map[string]string{
 }
 
 // newSQLite creates a new SQLite database handle using GORM.
-func newSQLite(dsn string, opts *Options) (*Store, error) {
-	dsn = sqliteDataSource(dsn, opts.Pragma)
+func newSQLite(dsn string) (*Store, error) {
+	dsn = sqliteDataSource(dsn)
 
 	// Open the database connection
 	db, err := gorm.Open(sqlite.Open(dsn), gormConfig())
@@ -28,11 +29,8 @@ func newSQLite(dsn string, opts *Options) (*Store, error) {
 	}
 
 	store := &Store{
-		Dialect:      DialectSQLite,
-		DB:           db,
-		Timeout:      opts.Timeout,
-		MaxPoolConns: opts.MaxPoolConns,
-		MinPoolConns: opts.MinPoolConns,
+		Dialect: DialectSQLite,
+		DB:      db,
 	}
 
 	// Configure connection pool
@@ -41,7 +39,7 @@ func newSQLite(dsn string, opts *Options) (*Store, error) {
 	}
 
 	// Apply pragmas
-	if err := store.applySQLitePragmas(opts.Pragma); err != nil {
+	if err := store.applySQLitePragmas(sqlitePragma); err != nil {
 		return nil, err
 	}
 
@@ -50,24 +48,14 @@ func newSQLite(dsn string, opts *Options) (*Store, error) {
 
 // configurePoolSQLite sets the number of connections for SQLite.
 func (s *Store) configurePoolSQLite() error {
-	maxConns := s.MaxPoolConns
-	if maxConns == 0 {
-		maxConns = suggestNumConns()
-	}
-	minIdle := s.MinPoolConns
-	if minIdle == 0 {
-		minIdle = 2
-	}
-
 	sqlDB, err := s.DB.DB()
 	if err != nil {
 		return err
 	}
-	// SQLite allows only one writer at a time. Setting the maximum
-	// number of DB connections to 1 for the single DB handle
-	// is the best and fastest way to enforce this.
-	configurePool(sqlDB, 1, 1)
-
+	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute) // Prevent stale connections
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Reclaim idle connections
 	return nil
 }
 
@@ -79,7 +67,6 @@ func (s *Store) applySQLitePragmas(pragma map[string]string) error {
 	// in the connection string, we also set them here.
 	//
 	// The correct way to set pragmas for the mattn driver is to
-	// use the connection hook (see cmd/redka/main.go on how to do this).
 	// But since we can't be sure the user does that, we also set them here.
 	//
 	// Setting pragmas using Exec only sets them for a single connection.
@@ -106,10 +93,17 @@ func (s *Store) applySQLitePragmas(pragma map[string]string) error {
 }
 
 // sqliteDataSource returns an SQLite connection string.
-func sqliteDataSource(path string, pragma map[string]string) string {
+func sqliteDataSource(path string) string {
 	// Parse the parameters.
-	source, query, _ := strings.Cut(path, "?")
+	source, query, hasQuery := strings.Cut(path, "?")
 	params, _ := url.ParseQuery(query)
+	if !hasQuery {
+		// Apply the pragma settings.
+		for name, val := range sqlitePragma {
+			params.Add(name, val)
+		}
+
+	}
 
 	if source == ":memory:" {
 		// This is an in-memory database, so we must either enable shared cache
@@ -132,19 +126,5 @@ func sqliteDataSource(path string, pragma map[string]string) string {
 	// Enable IMMEDIATE transactions for writable databases.
 	// https://www.sqlite.org/lang_transaction.html
 	params.Set("_txlock", "immediate")
-
-	// Apply the pragma settings.
-	// Some drivers (modernc and ncruces) support passing pragmas
-	// in the connection string, so we add them here.
-	// The mattn driver does not support this, so it'll just ignore them.
-	// For mattn driver, we have to set the pragmas in the connection hook.
-	// (see cmd/redka/main.go on how to do this).
-	if pragma == nil {
-		pragma = sqlitePragma
-	}
-	for name, val := range pragma {
-		params.Add("_pragma", name+"="+val)
-	}
-
 	return source + "?" + params.Encode()
 }

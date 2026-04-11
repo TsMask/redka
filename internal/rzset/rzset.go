@@ -3,7 +3,6 @@
 package rzset
 
 import (
-	"context"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -40,19 +39,14 @@ const scanPageSize = 10
 // Use the sorted set repository to work with sets and their elements,
 // and to perform set operations like union or intersection.
 type DB struct {
-	store  *store.Store
-	update func(f func(tx *Tx) error) error
-	dbIdx  int
+	store *store.Store
+	dbIdx int
 }
 
 // New connects to the sorted set repository.
 // Does not create the database schema.
 func New(s *store.Store) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
-		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
-	}
-	actor := store.NewTransactor(s, newTxFn)
-	return &DB{store: s, update: actor.Update, dbIdx: 0}
+	return &DB{store: s, dbIdx: 0}
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -68,13 +62,8 @@ func (d *DB) WithDB(dbIdx int) *DB {
 // If the key does not exist, creates it.
 // If the key exists but is not a set, returns ErrKeyType.
 func (d *DB) Add(key string, elem any, score float64) (bool, error) {
-	var created bool
-	err := d.update(func(tx *Tx) error {
-		var err error
-		created, err = tx.Add(key, elem, score)
-		return err
-	})
-	return created, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Add(key, elem, score)
 }
 
 // AddMany adds or updates multiple elements in a set.
@@ -82,13 +71,8 @@ func (d *DB) Add(key string, elem any, score float64) (bool, error) {
 // If the key does not exist, creates it.
 // If the key exists but is not a set, returns ErrKeyType.
 func (d *DB) AddMany(key string, items map[any]float64) (int, error) {
-	var count int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		count, err = tx.AddMany(key, items)
-		return err
-	})
-	return count, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.AddMany(key, items)
 }
 
 // Count returns the number of elements in a set with a score between
@@ -104,13 +88,8 @@ func (d *DB) Count(key string, min, max float64) (int, error) {
 // Ignores the elements that do not exist.
 // Does nothing if the key does not exist or is not a set.
 func (d *DB) Delete(key string, elems ...any) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.Delete(key, elems...)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Delete(key, elems...)
 }
 
 // DeleteWith removes elements from a set with additional options.
@@ -152,13 +131,8 @@ func (d *DB) GetScore(key string, elem any) (float64, error) {
 // before the increment. If the key does not exist, creates it.
 // If the key exists but is not a set, returns ErrKeyType.
 func (d *DB) Incr(key string, elem any, delta float64) (float64, error) {
-	var score float64
-	err := d.update(func(tx *Tx) error {
-		var err error
-		score, err = tx.Incr(key, elem, delta)
-		return err
-	})
-	return score, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Incr(key, elem, delta)
 }
 
 // Inter returns the intersection of multiple sets.
@@ -1200,13 +1174,8 @@ func (c DeleteCmd) ByScore(start, stop float64) DeleteCmd {
 // Does nothing if the key does not exist or is not a set.
 func (c DeleteCmd) Run() (int, error) {
 	if c.db != nil {
-		var n int
-		err := c.db.update(func(tx *Tx) error {
-			var err error
-			n, err = c.run(tx)
-			return err
-		})
-		return n, err
+		tx := NewTx(c.db.store.Dialect, c.db.store.DB, c.db.dbIdx)
+		return c.run(tx)
 	}
 	if c.tx != nil {
 		return c.run(c.tx)
@@ -1380,13 +1349,8 @@ func (c InterCmd) Run() ([]SetItem, error) {
 // except deleting the destination key if it exists.
 func (c InterCmd) Store() (int, error) {
 	if c.db != nil {
-		var count int
-		err := c.db.update(func(tx *Tx) error {
-			var err error
-			count, err = c.store(tx)
-			return err
-		})
-		return count, err
+		tx := NewTx(c.db.store.Dialect, c.db.store.DB, c.db.dbIdx)
+		return c.store(tx)
 	}
 	if c.tx != nil {
 		return c.store(c.tx)
@@ -1579,13 +1543,8 @@ func (c UnionCmd) Run() ([]SetItem, error) {
 // except deleting the destination key if it exists.
 func (c UnionCmd) Store() (int, error) {
 	if c.db != nil {
-		var count int
-		err := c.db.update(func(tx *Tx) error {
-			var err error
-			count, err = c.store(tx)
-			return err
-		})
-		return count, err
+		tx := NewTx(c.db.store.Dialect, c.db.store.DB, c.db.dbIdx)
+		return c.store(tx)
 	}
 	if c.tx != nil {
 		return c.store(c.tx)

@@ -3,7 +3,7 @@
 # Redka 全命令 redis-cli 功能测试脚本
 # 用法: ./test-redis-cli.sh [port] [host]
 #
-# 覆盖 redsrv/internal/command/command.go 中支持的命令
+# 覆盖 server/internal/command/command.go 中支持的命令
 
 set +e
 

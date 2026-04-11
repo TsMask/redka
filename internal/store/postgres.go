@@ -3,14 +3,15 @@ package store
 import (
 	"net/url"
 	"strings"
+	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 // newPostgres creates a new Postgres database handle using GORM.
-func newPostgres(dsn string, opts *Options) (*Store, error) {
-	dsn = postgresDataSource(dsn, opts.Pragma)
+func newPostgres(dsn string) (*Store, error) {
+	dsn = postgresDataSource(dsn)
 
 	// Open the database connection
 	db, err := gorm.Open(postgres.Open(dsn), gormConfig())
@@ -19,11 +20,8 @@ func newPostgres(dsn string, opts *Options) (*Store, error) {
 	}
 
 	store := &Store{
-		Dialect:      DialectPostgres,
-		DB:           db,
-		Timeout:      opts.Timeout,
-		MaxPoolConns: opts.MaxPoolConns,
-		MinPoolConns: opts.MinPoolConns,
+		Dialect: DialectPostgres,
+		DB:      db,
 	}
 
 	// Configure connection pool
@@ -36,34 +34,28 @@ func newPostgres(dsn string, opts *Options) (*Store, error) {
 
 // configurePoolPostgres sets the number of connections for Postgres.
 func (s *Store) configurePoolPostgres() error {
-	maxConns := s.MaxPoolConns
-	if maxConns == 0 {
-		maxConns = suggestNumConns()
-	}
-	minIdle := s.MinPoolConns
-	if minIdle == 0 {
-		minIdle = 2
-	}
-
 	sqlDB, err := s.DB.DB()
 	if err != nil {
 		return err
 	}
-	configurePool(sqlDB, maxConns, minIdle)
+	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute) // Prevent stale connections
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Reclaim idle connections
 
 	return nil
 }
 
 // postgresDataSource returns a Postgres connection string
-func postgresDataSource(path string, pragma map[string]string) string {
+func postgresDataSource(path string) string {
 	// Parse the parameters.
 	source, query, _ := strings.Cut(path, "?")
 	params, _ := url.ParseQuery(query)
 
 	// Apply additional settings.
-	for name, val := range pragma {
-		params.Add(name, val)
-	}
+	// for name, val := range pragma {
+	// 	params.Add(name, val)
+	// }
 
 	// Return the connection string.
 	if len(params) == 0 {

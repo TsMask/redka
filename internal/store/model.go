@@ -8,7 +8,7 @@ package store
 //   - 4: hash
 //   - 5: zset (sorted set)
 type RKey struct {
-	ID         int    `gorm:"column:id;primaryKey;autoIncrement"`
+	ID         int    `gorm:"column:id;primaryKey;autoIncrement"` // For Postgres/MySQL
 	KName      string `gorm:"column:kname;size:255;uniqueIndex:rkey_db_key_idx,priority:2;not null"`
 	KDB        int    `gorm:"column:kdb;uniqueIndex:rkey_db_key_idx,priority:1;not null;default:0"` // logical database 0-15
 	KType      int    `gorm:"column:ktype;not null"`

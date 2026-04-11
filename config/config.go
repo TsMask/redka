@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -66,20 +65,6 @@ func Load(path string) (*ServerConfig, error) {
 	return config, nil
 }
 
-// Save saves configuration to a YAML file.
-func (c *ServerConfig) Save(path string) error {
-	data, err := yaml.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write config file: %w", err)
-	}
-
-	return nil
-}
-
 // Validate validates the configuration.
 func (c *ServerConfig) Validate() error {
 	if c.Port < 1 || c.Port > 65535 {
@@ -112,27 +97,4 @@ func (c *ServerConfig) Address() string {
 		return c.Sock
 	}
 	return net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
-}
-
-// InferDriverName infers the database driver name from the DSN prefix.
-func InferDriverName(dsn string) string {
-
-	// PostgreSQL: postgres:// or postgresql:// or pgx://
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") || strings.HasPrefix(dsn, "pgx://") {
-		return "postgres"
-	}
-
-	// MySQL: mysql:// or mariadb:// or user@tcp(host)
-	if strings.HasPrefix(dsn, "mysql://") || strings.HasPrefix(dsn, "mariadb://") ||
-		strings.Contains(dsn, "@tcp(") {
-		return "mysql"
-	}
-
-	// SQLite: file:, sqlite:, sqlite3:, or any other format (default)
-	// SQLite DSN formats:
-	// - file:/path/to/db.db
-	// - sqlite:/path/to/db.db
-	// - sqlite3:/path/to/db.db
-	// Or just a plain file path like "/path/to/db.db"
-	return "sqlite"
 }

@@ -3,7 +3,6 @@
 package rstring
 
 import (
-	"context"
 	"errors"
 	"strconv"
 	"time"
@@ -18,20 +17,14 @@ import (
 // A string is a slice of bytes associated with a key.
 // Use the string repository to work with individual strings.
 type DB struct {
-	store  *store.Store
-	update func(f func(tx *Tx) error) error
-	dbIdx  int
+	store *store.Store
+	dbIdx int
 }
 
 // New connects to the string repository.
 // Does not create the database schema.
 func New(s *store.Store) *DB {
-	d := &DB{store: s, dbIdx: 0}
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
-		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
-	}
-	d.update = store.NewTransactor(s, newTxFn).Update
-	return d
+	return &DB{store: s, dbIdx: 0}
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -63,13 +56,8 @@ func (d *DB) GetMany(keys ...string) (map[string]core.Value, error) {
 // If the key value is not an integer, returns ErrValueType.
 // If the key exists but is not a string, returns ErrKeyType.
 func (d *DB) Incr(key string, delta int) (int, error) {
-	var val int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		val, err = tx.Incr(key, delta)
-		return err
-	})
-	return val, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Incr(key, delta)
 }
 
 // IncrFloat increments the float key value by the specified amount.
@@ -78,33 +66,24 @@ func (d *DB) Incr(key string, delta int) (int, error) {
 // If the key value is not an float, returns ErrValueType.
 // If the key exists but is not a string, returns ErrKeyType.
 func (d *DB) IncrFloat(key string, delta float64) (float64, error) {
-	var val float64
-	err := d.update(func(tx *Tx) error {
-		var err error
-		val, err = tx.IncrFloat(key, delta)
-		return err
-	})
-	return val, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.IncrFloat(key, delta)
 }
 
 // Set sets the key value that will not expire.
 // Overwrites the value if the key already exists.
 // If the key exists but is not a string, returns ErrKeyType.
 func (d *DB) Set(key string, value any) error {
-	err := d.update(func(tx *Tx) error {
-		return tx.Set(key, value)
-	})
-	return err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Set(key, value)
 }
 
 // SetExpire sets the key value with an optional expiration time (if ttl > 0).
 // Overwrites the value and ttl if the key already exists.
 // If the key exists but is not a string, returns ErrKeyType.
 func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
-	err := d.update(func(tx *Tx) error {
-		return tx.SetExpire(key, value, ttl)
-	})
-	return err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.SetExpire(key, value, ttl)
 }
 
 // SetMany sets the values of multiple keys.
@@ -113,10 +92,8 @@ func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
 // Removes the TTL for existing keys.
 // If any of the keys exists but is not a string, returns ErrKeyType.
 func (d *DB) SetMany(items map[string]any) error {
-	err := d.update(func(tx *Tx) error {
-		return tx.SetMany(items)
-	})
-	return err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.SetMany(items)
 }
 
 // SetWith sets the key value with additional options.
@@ -189,7 +166,7 @@ func (tx *Tx) Incr(key string, delta int) (int, error) {
 		err := txInner.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", tx.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			 Clauses(store.ForUpdate()).
+			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if err == gorm.ErrRecordNotFound {
 			// Key doesn't exist - create it with value = delta
@@ -531,13 +508,8 @@ func (tx *Tx) SetWith(key string, value any) SetCmd {
 // If the key does not exist, creates a new string with the value.
 // If the key exists but is not a string, returns ErrKeyType.
 func (d *DB) Append(key string, value []byte) (int, error) {
-	var length int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		length, err = tx.Append(key, value)
-		return err
-	})
-	return length, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Append(key, value)
 }
 
 // Append appends the value to the existing string value.
@@ -565,13 +537,8 @@ func (tx *Tx) Append(key string, value []byte) (int, error) {
 // (or the equivalent of setting "\x00" repeated offset times).
 // If the offset is beyond the string length, fills with zeros.
 func (d *DB) SetRange(key string, offset int, value []byte) (int, error) {
-	var length int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		length, err = tx.SetRange(key, offset, value)
-		return err
-	})
-	return length, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.SetRange(key, offset, value)
 }
 
 // SetRange overwrites the part of the string starting at offset with the value.
@@ -877,13 +844,8 @@ func (c SetCmd) KeepTTL() SetCmd {
 // with IfExists(), in which case does nothing).
 func (c SetCmd) Run() (out SetOut, err error) {
 	if c.db != nil {
-		var out SetOut
-		err := c.db.update(func(tx *Tx) error {
-			var err error
-			out, err = c.run(tx)
-			return err
-		})
-		return out, err
+		tx := NewTx(c.db.store.Dialect, c.db.store.DB, c.db.dbIdx)
+		return c.run(tx)
 	}
 	if c.tx != nil {
 		return c.run(c.tx)

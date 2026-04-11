@@ -3,7 +3,7 @@
 Install the module as follows:
 
 ```shell
-go get github.com/nalgeon/redka
+go get github.com/tsmask/redka
 ```
 
 You'll also need an SQLite or PostgreSQL driver.

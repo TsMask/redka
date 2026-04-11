@@ -3,7 +3,6 @@
 package rlist
 
 import (
-	"context"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -15,20 +14,14 @@ import (
 // A list is a sequence of strings ordered by insertion order.
 // Use the list repository to work with lists and their elements.
 type DB struct {
-	store  *store.Store
-	update func(f func(tx *Tx) error) error
-	dbIdx  int
+	store *store.Store
+	dbIdx int
 }
 
 // New connects to the list repository.
 // Does not create the database schema.
 func New(s *store.Store) *DB {
-	d := &DB{store: s, dbIdx: 0}
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
-		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
-	}
-	d.update = store.NewTransactor(s, newTxFn).Update
-	return d
+	return &DB{store: s, dbIdx: 0}
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -43,13 +36,8 @@ func (d *DB) WithDB(dbIdx int) *DB {
 // Returns the number of elements deleted.
 // Does nothing if the key does not exist or is not a list.
 func (d *DB) Delete(key string, elem any) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.Delete(key, elem)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Delete(key, elem)
 }
 
 // DeleteBack deletes the first count occurrences of an element
@@ -57,13 +45,8 @@ func (d *DB) Delete(key string, elem any) (int, error) {
 // Returns the number of elements deleted.
 // Does nothing if the key does not exist or is not a list.
 func (d *DB) DeleteBack(key string, elem any, count int) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.DeleteBack(key, elem, count)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.DeleteBack(key, elem, count)
 }
 
 // DeleteFront deletes the first count occurrences of an element
@@ -71,13 +54,8 @@ func (d *DB) DeleteBack(key string, elem any, count int) (int, error) {
 // Returns the number of elements deleted.
 // Does nothing if the key does not exist or is not a list.
 func (d *DB) DeleteFront(key string, elem any, count int) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.DeleteFront(key, elem, count)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.DeleteFront(key, elem, count)
 }
 
 // Get returns an element from a list by index (0-based).
@@ -95,13 +73,8 @@ func (d *DB) Get(key string, idx int) (core.Value, error) {
 // If the pivot does not exist, returns (-1, ErrNotFound).
 // If the key does not exist or is not a list, returns (0, ErrNotFound).
 func (d *DB) InsertAfter(key string, pivot, elem any) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.InsertAfter(key, pivot, elem)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.InsertAfter(key, pivot, elem)
 }
 
 // InsertBefore inserts an element before another element (pivot).
@@ -109,13 +82,8 @@ func (d *DB) InsertAfter(key string, pivot, elem any) (int, error) {
 // If the pivot does not exist, returns (-1, ErrNotFound).
 // If the key does not exist or is not a list, returns (0, ErrNotFound).
 func (d *DB) InsertBefore(key string, pivot, elem any) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.InsertBefore(key, pivot, elem)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.InsertBefore(key, pivot, elem)
 }
 
 // Len returns the number of elements in a list.
@@ -128,38 +96,23 @@ func (d *DB) Len(key string) (int, error) {
 // PopBack removes and returns the last element of a list.
 // If the key does not exist or is not a list, returns ErrNotFound.
 func (d *DB) PopBack(key string) (core.Value, error) {
-	var elem core.Value
-	err := d.update(func(tx *Tx) error {
-		var err error
-		elem, err = tx.PopBack(key)
-		return err
-	})
-	return elem, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.PopBack(key)
 }
 
 // PopBackPushFront removes the last element of a list
 // and prepends it to another list (or the same list).
 // If the source key does not exist or is not a list, returns ErrNotFound.
 func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
-	var elem core.Value
-	err := d.update(func(tx *Tx) error {
-		var err error
-		elem, err = tx.PopBackPushFront(src, dest)
-		return err
-	})
-	return elem, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.PopBackPushFront(src, dest)
 }
 
 // PopFront removes and returns the first element of a list.
 // If the key does not exist or is not a list, returns ErrNotFound.
 func (d *DB) PopFront(key string) (core.Value, error) {
-	var elem core.Value
-	err := d.update(func(tx *Tx) error {
-		var err error
-		elem, err = tx.PopFront(key)
-		return err
-	})
-	return elem, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.PopFront(key)
 }
 
 // PushBack appends an element to a list.
@@ -167,13 +120,8 @@ func (d *DB) PopFront(key string) (core.Value, error) {
 // If the key does not exist, creates it.
 // If the key exists but is not a list, returns ErrKeyType.
 func (d *DB) PushBack(key string, elem any) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.PushBack(key, elem)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.PushBack(key, elem)
 }
 
 // PushFront prepends an element to a list.
@@ -181,13 +129,8 @@ func (d *DB) PushBack(key string, elem any) (int, error) {
 // If the key does not exist, creates it.
 // If the key exists but is not a list, returns ErrKeyType.
 func (d *DB) PushFront(key string, elem any) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.PushFront(key, elem)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.PushFront(key, elem)
 }
 
 // Range returns a range of elements from a list.
@@ -206,10 +149,8 @@ func (d *DB) Range(key string, start, stop int) ([]core.Value, error) {
 // If the index is out of bounds, returns ErrNotFound.
 // If the key does not exist or is not a list, returns ErrNotFound.
 func (d *DB) Set(key string, idx int, elem any) error {
-	err := d.update(func(tx *Tx) error {
-		return tx.Set(key, idx, elem)
-	})
-	return err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Set(key, idx, elem)
 }
 
 // Trim removes elements from both ends of a list so that
@@ -222,9 +163,8 @@ func (d *DB) Set(key string, idx int, elem any) error {
 //
 // Does nothing if the key does not exist or is not a list.
 func (d *DB) Trim(key string, start, stop int) error {
-	return d.update(func(tx *Tx) error {
-		return tx.Trim(key, start, stop)
-	})
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Trim(key, start, stop)
 }
 
 // Tx is a list repository transaction.
@@ -986,7 +926,7 @@ func (tx *Tx) insert(key string, pivot any, elem any, after bool) (int, error) {
 				// Find all elements ordered by position
 				var elems []store.RList
 				tx.tx.Where("kid = ?", rkey.ID).Order("pos ASC").Find(&elems)
-				
+
 				// Renumber with large gaps: new_pos = (index + 1) * 1000
 				// This gives positions 1000, 2000, 3000... leaving huge room
 				// Insert BEFORE the pivot by using (pivot_index) * 1000 - 500
@@ -999,7 +939,7 @@ func (tx *Tx) insert(key string, pivot any, elem any, after bool) (int, error) {
 					// Track the pivot's new position to insert before it
 					if elem.ID == pivotElem.ID {
 						// Insert 500 before the pivot's new position
-						newPos = int64((i + 1) * 1000 - 500)
+						newPos = int64((i+1)*1000 - 500)
 					}
 				}
 			}

@@ -3,7 +3,6 @@
 package rset
 
 import (
-	"context"
 	"math/rand"
 	"time"
 
@@ -32,9 +31,8 @@ const keyTypeSet = 3
 // and their elements, and to perform set operations
 // like union, intersection.
 type DB struct {
-	store  *store.Store
-	update func(f func(tx *Tx) error) error
-	dbIdx  int
+	store *store.Store
+	dbIdx int
 }
 
 // Tx is a set repository transaction.
@@ -62,10 +60,6 @@ type Scanner struct {
 // Does not create the database schema.
 func New(s *store.Store) *DB {
 	d := &DB{store: s, dbIdx: 0}
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
-		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
-	}
-	d.update = store.NewTransactor(s, newTxFn).Update
 	return d
 }
 
@@ -88,13 +82,8 @@ func NewTx(dialect store.Dialect, tx *gorm.DB, dbIdx int) *Tx {
 // If the key does not exist, creates it.
 // If the key exists but is not a set, returns ErrKeyType.
 func (d *DB) Add(key string, elems ...any) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.Add(key, elems...)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Add(key, elems...)
 }
 
 // Delete removes elements from a set.
@@ -102,13 +91,8 @@ func (d *DB) Add(key string, elems ...any) (int, error) {
 // Ignores the elements that do not exist.
 // Does nothing if the key does not exist or is not a set.
 func (d *DB) Delete(key string, elems ...any) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.Delete(key, elems...)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Delete(key, elems...)
 }
 
 // Diff returns the difference between the first set and the rest.
@@ -131,13 +115,8 @@ func (d *DB) Diff(keys ...string) ([]core.Value, error) {
 // except deleting the destination key if it exists.
 // If any of the remaining source keys do not exist or are not sets, ignores them.
 func (d *DB) DiffStore(dest string, keys ...string) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.DiffStore(dest, keys...)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.DiffStore(dest, keys...)
 }
 
 // Exists reports whether the element belongs to a set.
@@ -164,13 +143,8 @@ func (d *DB) Inter(keys ...string) ([]core.Value, error) {
 // If any of the source keys do not exist or are not sets, does nothing,
 // except deleting the destination key if it exists.
 func (d *DB) InterStore(dest string, keys ...string) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.InterStore(dest, keys...)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.InterStore(dest, keys...)
 }
 
 // InterCard returns the number of elements in the intersection of multiple sets.
@@ -212,25 +186,15 @@ func (d *DB) Len(key string) (int, error) {
 // If the element already exists in the destination set,
 // only deletes it from the source set.
 func (d *DB) Move(src, dest string, elem any) (bool, error) {
-	var moved bool
-	err := d.update(func(tx *Tx) error {
-		var err error
-		moved, err = tx.Move(src, dest, elem)
-		return err
-	})
-	return moved, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Move(src, dest, elem)
 }
 
 // Pop removes and returns a random element from a set.
 // If the key does not exist or is not a set, returns ErrNotFound.
 func (d *DB) Pop(key string) (core.Value, error) {
-	var v core.Value
-	err := d.update(func(tx *Tx) error {
-		var err error
-		v, err = tx.Pop(key)
-		return err
-	})
-	return v, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Pop(key)
 }
 
 // Random returns a random element from a set.
@@ -287,13 +251,8 @@ func (d *DB) Union(keys ...string) ([]core.Value, error) {
 // If all of the source keys do not exist or are not sets, does nothing,
 // except deleting the destination key if it exists.
 func (d *DB) UnionStore(dest string, keys ...string) (int, error) {
-	var n int
-	err := d.update(func(tx *Tx) error {
-		var err error
-		n, err = tx.UnionStore(dest, keys...)
-		return err
-	})
-	return n, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.UnionStore(dest, keys...)
 }
 
 // Tx methods

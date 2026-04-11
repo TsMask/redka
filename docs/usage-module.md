@@ -2,7 +2,7 @@
 
 If you are using Go, Redka is available as a module without the need to start a separate server.
 
-See the [package documentation](https://pkg.go.dev/github.com/nalgeon/redka) for API reference.
+See the [package documentation](https://pkg.go.dev/github.com/tsmask/redka) for API reference.
 
 ## Opening the database
 
@@ -15,7 +15,7 @@ import (
     "log"
 
     _ "github.com/mattn/go-sqlite3"
-    "github.com/nalgeon/redka"
+    "github.com/tsmask/redka"
 )
 
 func main() {

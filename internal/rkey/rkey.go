@@ -3,7 +3,6 @@
 package rkey
 
 import (
-	"context"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -26,9 +25,8 @@ type ScanResult struct {
 // (string, list, hash, etc.). Use the key repository
 // to manage all keys regardless of their type.
 type DB struct {
-	store  *store.Store
-	update func(f func(tx *Tx) error) error
-	dbIdx  int
+	store *store.Store
+	dbIdx int
 }
 
 // Tx is a key repository transaction.
@@ -55,11 +53,7 @@ type Scanner struct {
 // New creates a new database-backed key repository.
 // Does not create the database schema.
 func New(s *store.Store) *DB {
-	newTxFn := func(dialect store.Dialect, tx *gorm.DB, ctx context.Context) *Tx {
-		return NewTx(dialect, tx, store.CtxDBIdx(ctx))
-	}
-	actor := store.NewTransactor(s, newTxFn)
-	return &DB{store: s, update: actor.Update, dbIdx: 0}
+	return &DB{store: s, dbIdx: 0}
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -168,24 +162,16 @@ func (d *DB) Random() (core.Key, error) {
 // If there is an existing key with the new name, it is replaced.
 // If the old key does not exist, returns ErrNotFound.
 func (d *DB) Rename(key, newKey string) error {
-	err := d.update(func(tx *Tx) error {
-		err := tx.Rename(key, newKey)
-		return err
-	})
-	return err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.Rename(key, newKey)
 }
 
 // RenameNotExists changes the key name.
 // If there is an existing key with the new name, does nothing.
 // Returns true if the key was renamed, false otherwise.
 func (d *DB) RenameNotExists(key, newKey string) (bool, error) {
-	var ok bool
-	err := d.update(func(tx *Tx) error {
-		var err error
-		ok, err = tx.RenameNotExists(key, newKey)
-		return err
-	})
-	return ok, err
+	tx := NewTx(d.store.Dialect, d.store.DB, d.dbIdx)
+	return tx.RenameNotExists(key, newKey)
 }
 
 // Scan iterates over keys matching pattern.
