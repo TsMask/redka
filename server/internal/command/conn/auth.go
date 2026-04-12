@@ -42,6 +42,8 @@ func (c Auth) Run(w redis.Writer, red redis.Redka) (any, error) {
 		return false, nil
 	}
 
+	// Mark connection as authenticated
+	redis.SetAuthenticated(w, true)
 	w.WriteString("OK")
 	return true, nil
 }

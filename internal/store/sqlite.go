@@ -9,15 +9,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// sqlitePragma is a set of default SQLite settings.
-var sqlitePragma = map[string]string{
-	"journal_mode": "wal",
-	"synchronous":  "normal",
-	"temp_store":   "memory",
-	"mmap_size":    "268435456",
-	"foreign_keys": "on",
-}
-
 // newSQLite creates a new SQLite database handle using GORM.
 func newSQLite(dsn string) (*Store, error) {
 	dsn = sqliteDataSource(dsn)
@@ -38,58 +29,22 @@ func newSQLite(dsn string) (*Store, error) {
 		return nil, err
 	}
 
-	// Apply pragmas
-	if err := store.applySQLitePragmas(sqlitePragma); err != nil {
-		return nil, err
-	}
-
 	return store, nil
 }
 
 // configurePoolSQLite sets the number of connections for SQLite.
+// SQLite uses database-level locking for writes, so we limit the number of
+// concurrent connections to reduce lock contention and improve performance.
 func (s *Store) configurePoolSQLite() error {
 	sqlDB, err := s.DB.DB()
 	if err != nil {
 		return err
 	}
-	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetMaxOpenConns(4)
 	sqlDB.SetMaxIdleConns(2)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute) // Prevent stale connections
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Reclaim idle connections
 	return nil
-}
-
-// applySQLitePragmas applies the database settings via PRAGMA statements.
-func (s *Store) applySQLitePragmas(pragma map[string]string) error {
-	// Ideally, we'd only set the pragmas in the connection string
-	// (see sqliteDataSource), so we wouldn't need this function.
-	// But since the mattn driver does not support setting pragmas
-	// in the connection string, we also set them here.
-	//
-	// The correct way to set pragmas for the mattn driver is to
-	// But since we can't be sure the user does that, we also set them here.
-	//
-	// Setting pragmas using Exec only sets them for a single connection.
-	if pragma == nil {
-		// If no pragmas are specified, use the default ones.
-		pragma = sqlitePragma
-	}
-
-	if len(pragma) == 0 {
-		// If there are no pragmas on purpose (empty map), don't do anything.
-		return nil
-	}
-
-	var query strings.Builder
-	for name, val := range pragma {
-		query.WriteString("pragma ")
-		query.WriteString(name)
-		query.WriteString("=")
-		query.WriteString(val)
-		query.WriteString(";")
-	}
-
-	return s.DB.Exec(query.String()).Error
 }
 
 // sqliteDataSource returns an SQLite connection string.
@@ -99,10 +54,22 @@ func sqliteDataSource(path string) string {
 	params, _ := url.ParseQuery(query)
 	if !hasQuery {
 		// Apply the pragma settings.
-		for name, val := range sqlitePragma {
-			params.Add(name, val)
+		pragmas := []string{
+			"journal_mode(WAL)",            // 启用 WAL 模式
+			"synchronous(NORMAL)",          // NORMAL 同步级别
+			"wal_autocheckpoint(5000)",     // 每 5000 页触发一次检查点
+			"busy_timeout(5000)",           // 设置忙碌时最大等待 5 秒
+			"mmap_size(268435456)",         // 设置 MMAP 大小为 256MB
+			"locking_mode(NORMAL)",         // 使用 NORMAL 锁定模式
+			"journal_size_limit(16777216)", // 设置 WAL 日志文件大小为 16MB
+			"cache_size(-64000)",           // 设置缓存大小为 64MB (-64000 表示 64MB)
+			"temp_store(MEMORY)",           // 使用内存存储临时表
+			"page_size=4096",               // 设置页大小为 4KB
+			"foreign_keys=ON",              // 启用外键约束
 		}
-
+		for _, v := range pragmas {
+			params.Add("_pragma", v)
+		}
 	}
 
 	if source == ":memory:" {

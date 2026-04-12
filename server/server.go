@@ -8,6 +8,7 @@ import (
 
 	"github.com/tidwall/redcon"
 	"github.com/tsmask/redka/config"
+	"github.com/tsmask/redka/internal/store"
 	"github.com/tsmask/redka/server/internal/redis"
 )
 
@@ -22,17 +23,17 @@ type Server struct {
 	net  string
 	addr string
 	srv  *redcon.Server
-	db   *config.DB
+	db   *store.Store
 }
 
 // New creates a new Redka server with the given
 // network, address and database. Does not start the server.
-func New(net string, addr string, db *config.DB) *Server {
+func New(net string, addr string, db *store.Store) *Server {
 	return NewWithConfig(net, addr, db, nil)
 }
 
 // NewWithConfig creates a new Redka server with custom configuration.
-func NewWithConfig(net string, addr string, db *config.DB, cfg *config.ServerConfig) *Server {
+func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerConfig) *Server {
 	handler := createHandlers(db)
 	runtimeStats := redis.NewRuntimeStats(time.Now(), redis.NewRuntimeRunID())
 

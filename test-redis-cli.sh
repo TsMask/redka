@@ -1,17 +1,24 @@
 #!/bin/bash
 #
 # Redka 全命令 redis-cli 功能测试脚本
-# 用法: ./test-redis-cli.sh [port] [host]
+# 用法: ./test-redis-cli.sh [port] [host] [password]
 #
 # 覆盖 server/internal/command/command.go 中支持的命令
 
-set +e
+set -e
 
 PORT=${1:-6380}
 HOST=${2:-127.0.0.1}
+PASSWORD=${3:-}
 CLI="redis-cli -h $HOST -p $PORT"
-PASS=0
-FAIL=0
+AUTH_REQUIRED=false
+PASS_COUNT=0
+FAIL_COUNT=0
+
+# 如果配置了密码，使用 -a 参数（redis-cli 每次命令都会使用这个密码认证）
+if [ -n "$PASSWORD" ]; then
+    CLI="redis-cli -h $HOST -p $PORT -a $PASSWORD"
+fi
 
 # command.go 支持命令清单（小写）
 SUPPORTED_COMMANDS=(
@@ -32,6 +39,24 @@ mark_covered() {
     [ -n "$cmd" ] && COVERED_COMMANDS["$cmd"]=1
 }
 
+authenticate() {
+    if [ -n "$PASSWORD" ]; then
+        AUTH_REQUIRED=true
+        echo "使用密码认证模式 (-a 参数)"
+        # 验证密码是否正确（只检查最后一行是否为 OK）
+        local result=$($CLI AUTH "$PASSWORD" 2>&1 | tail -1 | tr -d '\0')
+        if [ "$result" = "OK" ]; then
+            echo "AUTH 验证成功!"
+        else
+            echo "AUTH 验证失败: $result"
+            echo "请检查密码是否正确"
+            exit 1
+        fi
+    else
+        echo "无需认证 (无密码配置)"
+    fi
+}
+
 section() {
     echo ""
     echo "=========================================="
@@ -46,10 +71,10 @@ assert_eq() {
     local actual
     actual=$($CLI "$@" 2>/dev/null | tr -d '\0')
     if [ "$actual" = "$expect" ]; then
-        PASS=$((PASS + 1))
+        PASS_COUNT=$((PASS_COUNT + 1))
         printf "  \033[32mPASS\033[0m %s\n" "$desc"
     else
-        FAIL=$((FAIL + 1))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
         printf "  \033[31mFAIL\033[0m %s\n" "$desc"
         printf "    Expected: '%s'\n" "$expect"
         printf "    Actual:   '%s'\n" "$actual"
@@ -63,10 +88,10 @@ assert_int() {
     local actual
     actual=$($CLI "$@" 2>/dev/null | tr -d '\0')
     if [ "$actual" = "(integer) $expect" ] || [ "$actual" = "$expect" ]; then
-        PASS=$((PASS + 1))
+        PASS_COUNT=$((PASS_COUNT + 1))
         printf "  \033[32mPASS\033[0m %s\n" "$desc"
     else
-        FAIL=$((FAIL + 1))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
         printf "  \033[31mFAIL\033[0m %s\n" "$desc"
         printf "    Expected: '%s'\n" "$expect"
         printf "    Actual:   '%s'\n" "$actual"
@@ -80,10 +105,10 @@ assert_pattern() {
     local actual
     actual=$($CLI "$@" 2>/dev/null | tr -d '\0')
     if echo "$actual" | grep -qE "$pattern" 2>/dev/null; then
-        PASS=$((PASS + 1))
+        PASS_COUNT=$((PASS_COUNT + 1))
         printf "  \033[32mPASS\033[0m %s\n" "$desc"
     else
-        FAIL=$((FAIL + 1))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
         printf "  \033[31mFAIL\033[0m %s\n" "$desc"
         printf "    Expected pattern: '%s'\n" "$pattern"
         printf "    Actual:   '%s'\n" "$actual"
@@ -103,11 +128,11 @@ assert_any() {
     local actual
     actual=$($CLI "$@" 2>/dev/null | tr -d '\0')
     if echo "$actual" | grep -q "^ERR "; then
-        FAIL=$((FAIL + 1))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
         printf "  \033[31mFAIL\033[0m %s\n" "$desc"
         printf "    Actual:   '%s'\n" "$actual"
     else
-        PASS=$((PASS + 1))
+        PASS_COUNT=$((PASS_COUNT + 1))
         printf "  \033[32mPASS\033[0m %s\n" "$desc"
     fi
 }
@@ -119,11 +144,11 @@ assert_ttl() {
     local raw val
     raw=$($CLI "$@" 2>/dev/null | tr -d '\0')
     val="${raw#* }"
-    if [ "$val" -ge "$min" ] 2>/dev/null && [ "$val" -le "$max" ] 2>/dev/null; then
-        PASS=$((PASS + 1))
+    if [ "$val" -ge "$min" ] 2>/dev/null && [ "$val" -le "$max" ]; then
+        PASS_COUNT=$((PASS_COUNT + 1))
         printf "  \033[32mPASS\033[0m %s (TTL=%s, range [%s,%s])\n" "$desc" "$val" "$min" "$max"
     else
-        FAIL=$((FAIL + 1))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
         printf "  \033[31mFAIL\033[0m %s\n" "$desc"
         printf "    Expected TTL in [%s,%s], got: %s\n" "$min" "$max" "$raw"
     fi
@@ -140,11 +165,11 @@ assert_coverage() {
     done
 
     if [ ${#missing[@]} -eq 0 ]; then
-        PASS=$((PASS + 1))
-        echo "  \033[32mPASS\033[0m 覆盖了 command.go 中全部支持命令"
+        PASS_COUNT=$((PASS_COUNT + 1))
+        printf "  \033[32mPASS\033[0m %s\n" 覆盖了全部支持命令
     else
-        FAIL=$((FAIL + 1))
-        echo "  \033[31mFAIL\033[0m 存在未覆盖命令 (${#missing[@]}): ${missing[*]}"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        printf "  \033[31mFAIL\033[0m %s\n" " 存在未覆盖命令 (${#missing[@]}): ${missing[*]}"
     fi
 }
 
@@ -155,6 +180,9 @@ if ! $CLI PING >/dev/null 2>&1; then
     exit 1
 fi
 echo "连接成功!"
+
+# 认证检查
+authenticate
 
 $CLI FLUSHDB >/dev/null 2>&1 || true
 
@@ -167,7 +195,7 @@ assert_eq  "SELECT 0"                    "OK"                SELECT 0
 assert_int "DBSIZE (空库)"               "0"                 DBSIZE
 assert_eq  "COMMAND"                     "OK"                COMMAND
 assert_any "CONFIG GET"                                      CONFIG get requirepass
-assert_eq  "AUTH test"                   "OK"                AUTH helloearth
+assert_eq  "AUTH (已认证)"                "OK"                AUTH "$PASSWORD"
 assert_any "INFO"                                            INFO
 assert_any "LOLWUT"                                          LOLWUT
 assert_eq  "FLUSHALL"                    "OK"                FLUSHALL
@@ -350,13 +378,13 @@ assert_int "DBSIZE 最终"                 "0"                 DBSIZE
 
 assert_coverage
 
-TOTAL=$((PASS + FAIL))
+TOTAL=$((PASS_COUNT + FAIL_COUNT))
 section "测试结果汇总"
-echo "通过: $PASS"
-echo "失败: $FAIL"
+echo "通过: $PASS_COUNT"
+echo "失败: $FAIL_COUNT"
 echo "总计: $TOTAL"
-if [ $FAIL -gt 0 ]; then
-    RATE=$(awk "BEGIN{printf \"%.1f\", $PASS*100/$TOTAL}")
+if [ $FAIL_COUNT -gt 0 ]; then
+    RATE=$(awk "BEGIN{printf \"%.1f\", $PASS_COUNT*100/$TOTAL}")
     echo "通过率: ${RATE}%"
     echo "存在失败的测试用例!"
     exit 1

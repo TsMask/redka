@@ -154,8 +154,8 @@ Redka 不追求极致性能。使用 SQLite 这种通用关系型后端无法击
 
 ```
 redka/
-├── cmd/redka/main.go      # 服务入口
-├── redsrv/                # 服务器实现
+├── main.go                # 服务入口
+├── server/                # 服务器实现
 ├── internal/              # 内部核心模块
 ├── config/                # 配置加载
 ├── docs/                  # 文档

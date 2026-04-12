@@ -27,7 +27,7 @@ vet:
 
 build:
 	@echo "> running build..."
-	@CGO_ENABLED=1 go build -ldflags "-s -w -X config.version=$(build_ver) -X config.commit=$(build_rev) -X config.date=$(build_date)" -trimpath -o build/redka -v cmd/redka/main.go
+	@CGO_ENABLED=1 go build -ldflags "-s -w -X config.version=$(build_ver) -X config.commit=$(build_rev) -X config.date=$(build_date)" -trimpath -o build/redka -v main.go
 	@echo "✓ finished build"
 
 run:

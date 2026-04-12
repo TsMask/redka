@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/tsmask/redka/config"
+	"github.com/tsmask/redka/internal/store"
 	"github.com/tsmask/redka/server"
 )
 
@@ -23,19 +24,19 @@ func init() {
 
 func main() {
 	cfg := config.FlagConfig()
-	logger := config.LoggerConfig(cfg)
+	config.LoggerConfig(cfg)
 	// Open the database.
-	db, err := config.OpenDB(cfg.DBDSN, logger)
+	db, err := store.Open(cfg.DBDSN)
 	if err != nil {
 		slog.Error("data source", "error", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Redka By %s\n", db.Dialect())
+	fmt.Printf("Redka By %s\n", db.Dialect)
 	fmt.Printf("Version: %s\nCommit: %s\nBuiltAt: %s\n", config.Version, config.Commit, config.Date)
 
 	// Prepare a context to handle shutdown signals.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	// Start application and debug servers.
@@ -55,7 +56,7 @@ func main() {
 }
 
 // startServer starts the application server.
-func startServer(cfg *config.ServerConfig, db *config.DB, ready chan error) *server.Server {
+func startServer(cfg *config.ServerConfig, db *store.Store, ready chan error) *server.Server {
 	// Create the server.
 	var srv *server.Server
 	if cfg != nil {

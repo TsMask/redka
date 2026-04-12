@@ -39,7 +39,7 @@ func (s *Store) configurePoolPostgres() error {
 		return err
 	}
 	sqlDB.SetMaxOpenConns(100)
-	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetMaxIdleConns(50)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute) // Prevent stale connections
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Reclaim idle connections
 

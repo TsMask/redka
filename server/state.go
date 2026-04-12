@@ -3,7 +3,6 @@ package server
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/tidwall/redcon"
 	"github.com/tsmask/redka/server/internal/redis"
@@ -17,11 +16,6 @@ const (
 )
 
 var errQueueFull = errors.New("ERR transaction queue full")
-
-// normName returns the normalized command name.
-func normName(cmd redcon.Command) string {
-	return strings.ToLower(string(cmd.Args[0]))
-}
 
 // ctxKeyState is the context map key for connection state.
 const ctxKeyState = "state"

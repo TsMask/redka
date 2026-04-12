@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     -ldflags "-s -w -X config.version=${VERSION} -X config.commit=${COMMIT} -X config.date=${DATE}" \
     -trimpath \
     -o /app/build/redka \
-    cmd/redka/main.go
+    main.go
 
 # Final stage
 FROM alpine:3.21 AS runtime

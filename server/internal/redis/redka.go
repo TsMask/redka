@@ -3,7 +3,6 @@ package redis
 import (
 	"time"
 
-	"github.com/tsmask/redka/config"
 	"github.com/tsmask/redka/internal/core"
 	"github.com/tsmask/redka/internal/rhash"
 	"github.com/tsmask/redka/internal/rkey"
@@ -11,6 +10,7 @@ import (
 	"github.com/tsmask/redka/internal/rset"
 	"github.com/tsmask/redka/internal/rstring"
 	"github.com/tsmask/redka/internal/rzset"
+	"github.com/tsmask/redka/internal/store"
 )
 
 // RHash is a hash repository.
@@ -78,7 +78,7 @@ type RSet interface {
 	Delete(key string, elems ...any) (int, error)
 	Diff(keys ...string) ([]core.Value, error)
 	DiffStore(dest string, keys ...string) (int, error)
-	Exists(key, elem any) (bool, error)
+	Exists(key string, elem any) (bool, error)
 	ExistsMany(key string, members ...any) ([]bool, error)
 	Inter(keys ...string) ([]core.Value, error)
 	InterCard(limit int, keys ...string) (int, error)
@@ -127,7 +127,6 @@ type RZSet interface {
 	Range(key string, start, stop int) ([]rzset.SetItem, error)
 	RangeWith(key string) rzset.RangeCmd
 	Scan(key string, cursor int, pattern string, count int) (rzset.ScanResult, error)
-	Scanner(key, pattern string, pageSize int) *rzset.Scanner
 	Union(keys ...string) ([]rzset.SetItem, error)
 	UnionWith(keys ...string) rzset.UnionCmd
 }
@@ -143,27 +142,16 @@ type Redka struct {
 	zset RZSet
 }
 
-// RedkaDB creates a new Redka instance for a database.
-func RedkaDB(db *config.DB) Redka {
+// NewRedka creates a new Redka instance from a store.Store and database index.
+// This is the primary constructor for simplified architecture.
+func NewRedka(s *store.Store, dbIdx int) Redka {
 	return Redka{
-		hash: rhash.New(db.Store()),
-		key:  rkey.New(db.Store()),
-		list: rlist.New(db.Store()),
-		set:  rset.New(db.Store()),
-		str:  rstring.New(db.Store()),
-		zset: rzset.New(db.Store()),
-	}
-}
-
-// RedkaTx creates a new Redka instance for a transaction.
-func RedkaTx(tx *config.Tx, dbIdx int) Redka {
-	return Redka{
-		hash: rhash.NewTx(tx.Dialect(), tx.DB(), dbIdx),
-		key:  rkey.NewTx(tx.Dialect(), tx.DB(), dbIdx),
-		list: rlist.NewTx(tx.Dialect(), tx.DB(), dbIdx),
-		set:  rset.NewTx(tx.Dialect(), tx.DB(), dbIdx),
-		str:  rstring.NewTx(tx.Dialect(), tx.DB(), dbIdx),
-		zset: rzset.NewTx(tx.Dialect(), tx.DB(), dbIdx),
+		hash: rhash.New(s).WithDB(dbIdx),
+		key:  rkey.New(s).WithDB(dbIdx),
+		list: rlist.New(s).WithDB(dbIdx),
+		set:  rset.New(s).WithDB(dbIdx),
+		str:  rstring.New(s).WithDB(dbIdx),
+		zset: rzset.New(s).WithDB(dbIdx),
 	}
 }
 

@@ -24,7 +24,7 @@ func LoggerConfig(cfg *ServerConfig) *slog.Logger {
 		// Open log file
 		file, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
-			slog.Error("Failed to open log file, using stdout only", "error", err, "file", cfg.LogFile)
+			slog.Error("failed to open log file, using stdout only", "error", err, "file", cfg.LogFile)
 			logWriter = os.Stdout
 		} else {
 			// Write to both file and stdout

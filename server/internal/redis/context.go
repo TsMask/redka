@@ -1,15 +1,19 @@
 package redis
 
 import (
+	"context"
+
 	"github.com/tidwall/redcon"
 	"github.com/tsmask/redka/config"
 )
 
 // Context keys for per-connection state.
 const (
-	CtxKeyConfig     = "config"
-	CtxKeySelectedDB = "selected_db"
-	CtxKeyRuntime    = "runtime_stats"
+	CtxKeyConfig        = "config"
+	CtxKeySelectedDB    = "selected_db"
+	CtxKeyRuntime       = "runtime_stats"
+	CtxKeyRequest       = "request_ctx"   // Request-scoped context for timeout/cancellation
+	CtxKeyAuthenticated = "authenticated" // Authentication state for the connection
 )
 
 // ConnWriter wraps a redcon.Conn to implement the Writer interface.
@@ -138,4 +142,35 @@ func GetRuntimeStats(w Writer) *RuntimeStats {
 // SetRuntimeStats stores runtime stats in the Writer context.
 func SetRuntimeStats(w Writer, stats *RuntimeStats) {
 	w.SetContext(CtxKeyRuntime, stats)
+}
+
+// GetRequestCtx returns the request-scoped context from the Writer context.
+// Returns context.Background() if not set.
+func GetRequestCtx(w Writer) context.Context {
+	if v := w.Context(CtxKeyRequest); v != nil {
+		if ctx, ok := v.(context.Context); ok {
+			return ctx
+		}
+	}
+	return context.Background()
+}
+
+// SetRequestCtx stores the request-scoped context in the Writer context.
+func SetRequestCtx(w Writer, ctx context.Context) {
+	w.SetContext(CtxKeyRequest, ctx)
+}
+
+// IsAuthenticated returns whether the client has been authenticated.
+func IsAuthenticated(w Writer) bool {
+	if v := w.Context(CtxKeyAuthenticated); v != nil {
+		if auth, ok := v.(bool); ok {
+			return auth
+		}
+	}
+	return false
+}
+
+// SetAuthenticated marks the connection as authenticated.
+func SetAuthenticated(w Writer, auth bool) {
+	w.SetContext(CtxKeyAuthenticated, auth)
 }
