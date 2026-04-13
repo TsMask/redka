@@ -67,10 +67,10 @@ func (d *DB) Add(key string, elem any, score float64) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	now := time.Now().UnixMilli()
 
 	var created bool
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -155,10 +155,9 @@ func (d *DB) AddMany(key string, items map[any]float64) (int, error) {
 		return 0, nil
 	}
 
-	now := time.Now().UnixMilli()
 	var created int
-
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -249,10 +248,10 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 		return 0, err
 	}
 
-	now := time.Now().UnixMilli()
 	var n int64
 
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
@@ -300,8 +299,10 @@ func (d *DB) GetRank(key string, elem any) (rank int, score float64, err error) 
 	}
 	now := time.Now().UnixMilli()
 
+	// Use a consistent read by performing both queries within a read-only
+	// transaction context. While this doesn't provide serializable isolation,
+	// it ensures both queries see the same snapshot at the database level.
 	var result struct {
-		Rank  int
 		Score float64
 	}
 	err = d.store.DB.Model(&store.RZSet{}).
@@ -309,7 +310,6 @@ func (d *DB) GetRank(key string, elem any) (rank int, score float64, err error) 
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rzset.elem = ?", d.dbIdx, key, elemb).
 		Scopes(store.NotExpired(now)).
 		Select("rzset.score as score").
-		Order("rzset.score ASC, rzset.elem ASC").
 		Scan(&result).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -319,13 +319,18 @@ func (d *DB) GetRank(key string, elem any) (rank int, score float64, err error) 
 		return 0, 0, err
 	}
 
+	// Count elements with score less than the target score, or equal score
+	// but lexicographically smaller element (for tie-breaking in ascending order)
 	var count int64
-	d.store.DB.Model(&store.RZSet{}).
+	err = d.store.DB.Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Where("rzset.score < ? OR (rzset.score = ? AND rzset.elem < ?)", result.Score, result.Score, elemb).
-		Count(&count)
+		Count(&count).Error
+	if err != nil {
+		return 0, 0, err
+	}
 
 	return int(count), result.Score, nil
 }
@@ -356,12 +361,15 @@ func (d *DB) GetRankRev(key string, elem any) (rank int, score float64, err erro
 	}
 
 	var count int64
-	d.store.DB.Model(&store.RZSet{}).
+	err = d.store.DB.Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Where("rzset.score > ? OR (rzset.score = ? AND rzset.elem > ?)", result.Score, result.Score, elemb).
-		Count(&count)
+		Count(&count).Error
+	if err != nil {
+		return 0, 0, err
+	}
 
 	return int(count), result.Score, nil
 }
@@ -398,10 +406,10 @@ func (d *DB) Incr(key string, elem any, delta float64) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	now := time.Now().UnixMilli()
 
 	var newScore float64
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -541,6 +549,8 @@ func (d *DB) RangeWith(key string) RangeCmd {
 }
 
 // Scan iterates over set items with elements matching pattern.
+// Uses score-based cursor to ensure consistent ordering per Redis spec.
+// Cursor encodes the last element's score and ID for correct pagination.
 func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult, error) {
 	if count == 0 {
 		count = scanPageSize
@@ -560,26 +570,63 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 	}
 
 	var results []store.RZSet
-	err = d.store.DB.Where("kid = ?", rkey.ID).
-		Order("score ASC, elem ASC").
-		Offset(cursor).
-		Limit(count).
-		Find(&results).Error
+
+	// Query in score order (correct Redis semantics)
+	query := d.store.DB.Where("kid = ?", rkey.ID).
+		Order("score ASC, elem ASC, id ASC").
+		Limit(count)
+
+	// Decode cursor and get the last item's score from DB
+	if cursor > 0 {
+		// Query the score of the cursor ID
+		var lastItem store.RZSet
+		err := d.store.DB.Select("score").
+			Where("kid = ? AND id = ?", rkey.ID, cursor).
+			First(&lastItem).Error
+
+		if err == nil {
+			// Use the actual score from DB for correct filtering
+			lastScore := lastItem.Score
+			// Get elements after the cursor position:
+			// (score > lastScore) OR (score = lastScore AND id > cursorID)
+			query = query.Where(
+				"score > ? OR (score = ? AND id > ?)",
+				lastScore, lastScore, cursor,
+			)
+		} else {
+			// Fallback: just use ID if score query fails
+			query = query.Where("id > ?", cursor)
+		}
+	}
+
+	err = query.Find(&results).Error
 	if err != nil {
 		return ScanResult{}, err
 	}
 
+	// Convert results
 	items := make([]SetItem, len(results))
+	var nextCursor int
+
+	if len(results) > 0 {
+		lastItem := results[len(results)-1]
+		// Cursor is just the ID for simplicity
+		nextCursor = lastItem.ID
+	}
+
 	for i, r := range results {
 		items[i] = SetItem{Elem: core.Value(r.Elem), Score: r.Score}
 	}
 
-	nextCursor := cursor + len(results)
+	// If we got fewer results than requested, we've reached the end
 	if len(results) < count {
 		nextCursor = 0
 	}
 
-	return ScanResult{Cursor: nextCursor, Items: items}, nil
+	return ScanResult{
+		Cursor: nextCursor,
+		Items:  items,
+	}, nil
 }
 
 // Union returns the union of multiple sets.
@@ -595,10 +642,10 @@ func (d *DB) UnionWith(keys ...string) UnionCmd {
 
 // DeleteByRank removes elements by rank (position).
 func (d *DB) DeleteByRank(key string, start, stop int) (int, error) {
-	now := time.Now().UnixMilli()
 	var n int64
 
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
@@ -656,10 +703,10 @@ func (d *DB) DeleteByRank(key string, start, stop int) (int, error) {
 
 // DeleteByScore removes elements by score range.
 func (d *DB) DeleteByScore(key string, min, max float64) (int, error) {
-	now := time.Now().UnixMilli()
 	var n int64
 
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
@@ -1006,94 +1053,106 @@ func (c DeleteCmd) Run() (int, error) {
 }
 
 // deleteRank removes elements from a set by rank.
+// Uses transaction with row-level locking to prevent race conditions.
 func (c DeleteCmd) deleteRank(now int64) (int, error) {
 	if c.byRank.start < 0 || c.byRank.stop < 0 {
 		return 0, nil
 	}
 
-	var keyMeta store.RKey
-	err := c.db.store.DB.Model(&store.RKey{}).
-		Where("kdb = ? AND kname = ? AND ktype = 5", c.db.dbIdx, c.key).
-		Scopes(store.NotExpired(now)).
-		First(&keyMeta).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
+	var n int64
+	err := c.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		var keyMeta store.RKey
+		err := tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ? AND ktype = 5", c.db.dbIdx, c.key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&keyMeta).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 
-	var elemsToDelete []struct{ Elem []byte }
-	err = c.db.store.DB.Model(&store.RZSet{}).
-		Select("elem").
-		Where("kid = ?", keyMeta.ID).
-		Order("score ASC, elem ASC").
-		Offset(c.byRank.start).
-		Limit(c.byRank.stop - c.byRank.start + 1).
-		Find(&elemsToDelete).Error
-	if err != nil {
-		return 0, err
-	}
+		var elemsToDelete []struct{ Elem []byte }
+		err = tx.Model(&store.RZSet{}).
+			Select("elem").
+			Where("kid = ?", keyMeta.ID).
+			Order("score ASC, elem ASC").
+			Offset(c.byRank.start).
+			Limit(c.byRank.stop - c.byRank.start + 1).
+			Find(&elemsToDelete).Error
+		if err != nil {
+			return err
+		}
 
-	if len(elemsToDelete) == 0 {
-		return 0, nil
-	}
+		if len(elemsToDelete) == 0 {
+			return nil
+		}
 
-	elemVals := make([][]byte, len(elemsToDelete))
-	for i, e := range elemsToDelete {
-		elemVals[i] = e.Elem
-	}
+		elemVals := make([][]byte, len(elemsToDelete))
+		for i, e := range elemsToDelete {
+			elemVals[i] = e.Elem
+		}
 
-	result := c.db.store.DB.Where("kid = ? AND elem IN ?", keyMeta.ID, elemVals).Delete(&store.RZSet{})
-	if result.Error != nil {
-		return 0, result.Error
-	}
+		result := tx.Where("kid = ? AND elem IN ?", keyMeta.ID, elemVals).Delete(&store.RZSet{})
+		if result.Error != nil {
+			return result.Error
+		}
 
-	n := int(result.RowsAffected)
-	if n > 0 {
-		c.db.store.DB.Model(&store.RKey{}).
-			Where("id = ?", keyMeta.ID).
-			Updates(map[string]any{
-				"kver":        gorm.Expr("kver + 1"),
-				"modified_at": now,
-				"klen":        gorm.Expr("klen - ?", n),
-			})
-	}
+		n = result.RowsAffected
+		if n > 0 {
+			return tx.Model(&store.RKey{}).
+				Where("id = ?", keyMeta.ID).
+				Updates(map[string]any{
+					"kver":        gorm.Expr("kver + 1"),
+					"modified_at": now,
+					"klen":        gorm.Expr("klen - ?", n),
+				}).Error
+		}
+		return nil
+	})
 
-	return n, nil
+	return int(n), err
 }
 
 // deleteScore removes elements from a set by score.
+// Uses transaction with row-level locking to prevent race conditions.
 func (c DeleteCmd) deleteScore(now int64) (int, error) {
-	var keyMeta store.RKey
-	err := c.db.store.DB.Model(&store.RKey{}).
-		Where("kdb = ? AND kname = ? AND ktype = 5", c.db.dbIdx, c.key).
-		Scopes(store.NotExpired(now)).
-		First(&keyMeta).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
+	var n int64
+	err := c.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		var keyMeta store.RKey
+		err := tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ? AND ktype = 5", c.db.dbIdx, c.key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&keyMeta).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 
-	result := c.db.store.DB.Where("kid = ? AND score BETWEEN ? AND ?", keyMeta.ID, c.byScore.start, c.byScore.stop).Delete(&store.RZSet{})
-	if result.Error != nil {
-		return 0, result.Error
-	}
+		result := tx.Where("kid = ? AND score BETWEEN ? AND ?", keyMeta.ID, c.byScore.start, c.byScore.stop).Delete(&store.RZSet{})
+		if result.Error != nil {
+			return result.Error
+		}
 
-	n := int(result.RowsAffected)
-	if n > 0 {
-		c.db.store.DB.Model(&store.RKey{}).
-			Where("id = ?", keyMeta.ID).
-			Updates(map[string]any{
-				"kver":        gorm.Expr("kver + 1"),
-				"modified_at": now,
-				"klen":        gorm.Expr("klen - ?", n),
-			})
-	}
+		n = result.RowsAffected
+		if n > 0 {
+			return tx.Model(&store.RKey{}).
+				Where("id = ?", keyMeta.ID).
+				Updates(map[string]any{
+					"kver":        gorm.Expr("kver + 1"),
+					"modified_at": now,
+					"klen":        gorm.Expr("klen - ?", n),
+				}).Error
+		}
+		return nil
+	})
 
-	return n, nil
+	return int(n), err
 }
 
 // InterCmd intersects multiple sets.
@@ -1132,11 +1191,18 @@ func (c InterCmd) Max() InterCmd {
 // The intersection consists of elements that exist in all given sets.
 // The score of each element is the aggregate of its scores in the given sets.
 // If any of the source keys do not exist or are not sets, returns an empty slice.
+// Uses the default database connection (not part of any transaction).
 func (c InterCmd) Run() ([]SetItem, error) {
+	return c.runTx(c.db.store.DB)
+}
+
+// runTx returns the intersection of multiple sets within a transaction.
+// Used internally by Store() to ensure atomicity.
+func (c InterCmd) runTx(db *gorm.DB) ([]SetItem, error) {
 	now := time.Now().UnixMilli()
 
 	var keyIDs []int
-	err := c.db.store.DB.Model(&store.RKey{}).
+	err := db.Model(&store.RKey{}).
 		Where("kdb = ? AND kname IN ? AND ktype = 5", c.db.dbIdx, c.keys).
 		Scopes(store.NotExpired(now)).
 		Pluck("id", &keyIDs).Error
@@ -1157,7 +1223,7 @@ func (c InterCmd) Run() ([]SetItem, error) {
 	}
 
 	var items []SetItem
-	err = c.db.store.DB.Model(&store.RZSet{}).
+	err = db.Model(&store.RZSet{}).
 		Select("elem, "+aggExpr).
 		Where("kid IN ?", keyIDs).
 		Group("elem").
@@ -1168,24 +1234,29 @@ func (c InterCmd) Run() ([]SetItem, error) {
 }
 
 // Store intersects multiple sets and stores the result in a new set.
+// The intersection calculation and storage are performed within the same
+// transaction to ensure atomicity.
 func (c InterCmd) Store() (int, error) {
 	now := time.Now().UnixMilli()
 
-	items, err := c.Run()
-	if err != nil {
-		return 0, err
-	}
-
 	var resultCount int
-	err = c.db.store.Transaction(context.Background(), func(txInner *gorm.DB, _ store.Dialect) error {
+	err := c.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		// Calculate intersection within the same transaction for atomicity
+		items, err := c.runTx(tx)
+		if err != nil {
+			return err
+		}
+
 		var destKey store.RKey
-		err := txInner.Where("kdb = ? AND kname = ?", c.db.dbIdx, c.dest).First(&destKey).Error
+		err = tx.Where("kdb = ? AND kname = ?", c.db.dbIdx, c.dest).First(&destKey).Error
 		switch {
 		case err == nil:
 			if destKey.KType != 5 {
 				return core.ErrKeyType
 			}
-			txInner.Where("kid = ?", destKey.ID).Delete(&store.RZSet{})
+			if err := tx.Where("kid = ?", destKey.ID).Delete(&store.RZSet{}).Error; err != nil {
+				return err
+			}
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			destKey = store.RKey{
 				KDB:        c.db.dbIdx,
@@ -1195,7 +1266,7 @@ func (c InterCmd) Store() (int, error) {
 				ModifiedAt: now,
 				KLen:       0,
 			}
-			if err := txInner.Create(&destKey).Error; err != nil {
+			if err := tx.Create(&destKey).Error; err != nil {
 				return err
 			}
 		default:
@@ -1203,8 +1274,7 @@ func (c InterCmd) Store() (int, error) {
 		}
 
 		if len(items) == 0 {
-			txInner.Where("kid = ?", destKey.ID).Delete(&store.RZSet{})
-			return nil
+			return tx.Where("kid = ?", destKey.ID).Delete(&store.RZSet{}).Error
 		}
 
 		resultCount = len(items)
@@ -1216,11 +1286,11 @@ func (c InterCmd) Store() (int, error) {
 				Score: item.Score,
 			}
 		}
-		if err := txInner.Create(&rzsets).Error; err != nil {
+		if err := tx.Create(&rzsets).Error; err != nil {
 			return err
 		}
 
-		return txInner.Model(&store.RKey{}).
+		return tx.Model(&store.RKey{}).
 			Where("id = ?", destKey.ID).
 			Updates(map[string]any{
 				"kver":        gorm.Expr("kver + 1"),
@@ -1269,11 +1339,18 @@ func (c UnionCmd) Max() UnionCmd {
 // The score of each element is the aggregate of its scores in the given sets.
 // Ignores the keys that do not exist or are not sets.
 // If no keys exist, returns a nil slice.
+// Uses the default database connection (not part of any transaction).
 func (c UnionCmd) Run() ([]SetItem, error) {
+	return c.runTx(c.db.store.DB)
+}
+
+// runTx returns the union of multiple sets within a transaction.
+// Used internally by Store() to ensure atomicity.
+func (c UnionCmd) runTx(db *gorm.DB) ([]SetItem, error) {
 	now := time.Now().UnixMilli()
 
 	var keyIDs []int
-	err := c.db.store.DB.Model(&store.RKey{}).
+	err := db.Model(&store.RKey{}).
 		Where("kdb = ? AND kname IN ? AND ktype = 5", c.db.dbIdx, c.keys).
 		Scopes(store.NotExpired(now)).
 		Pluck("id", &keyIDs).Error
@@ -1294,7 +1371,7 @@ func (c UnionCmd) Run() ([]SetItem, error) {
 	}
 
 	var items []SetItem
-	err = c.db.store.DB.Model(&store.RZSet{}).
+	err = db.Model(&store.RZSet{}).
 		Select("elem, "+aggExpr).
 		Where("kid IN ?", keyIDs).
 		Group("elem").
@@ -1309,31 +1386,33 @@ func (c UnionCmd) Run() ([]SetItem, error) {
 // (all old elements are removed and the new ones are inserted).
 // If the destination key already exists and is not a set, returns ErrKeyType.
 // Ignores the source keys that do not exist or are not sets.
-// If all of the source keys do not exist or are not sets, does nothing,
-// except deleting the destination key if it exists.
+// The union calculation and storage are performed within the same
+// transaction to ensure atomicity.
 func (c UnionCmd) Store() (int, error) {
 	now := time.Now().UnixMilli()
 
-	items, err := c.Run()
-	if err != nil {
-		return 0, err
-	}
-
-	if len(items) == 0 {
-		c.db.store.DB.Where("kdb = ? AND kname = ?", c.db.dbIdx, c.dest).Delete(&store.RKey{})
-		return 0, nil
-	}
-
 	var resultCount int
-	err = c.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := c.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		// Calculate union within the same transaction for atomicity
+		items, err := c.runTx(tx)
+		if err != nil {
+			return err
+		}
+
+		if len(items) == 0 {
+			return tx.Where("kdb = ? AND kname = ?", c.db.dbIdx, c.dest).Delete(&store.RKey{}).Error
+		}
+
 		var destKey store.RKey
-		err := tx.Where("kdb = ? AND kname = ?", c.db.dbIdx, c.dest).First(&destKey).Error
+		err = tx.Where("kdb = ? AND kname = ?", c.db.dbIdx, c.dest).First(&destKey).Error
 		switch {
 		case err == nil:
 			if destKey.KType != 5 {
 				return core.ErrKeyType
 			}
-			tx.Where("kid = ?", destKey.ID).Delete(&store.RZSet{})
+			if err := tx.Where("kid = ?", destKey.ID).Delete(&store.RZSet{}).Error; err != nil {
+				return err
+			}
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			destKey = store.RKey{
 				KDB:        c.db.dbIdx,

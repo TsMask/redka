@@ -206,10 +206,9 @@ func (d *DB) GetMany(key string, fields ...string) (map[string]core.Value, error
 // Incr increments the integer value of a field by delta.
 // Returns the value after the increment.
 func (d *DB) Incr(key, field string, delta int) (int, error) {
-	now := time.Now().UnixMilli()
-
 	var newVal int
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -232,9 +231,9 @@ func (d *DB) Incr(key, field string, delta int) (int, error) {
 			}
 			newVal = delta
 			rhash := store.RHash{
-				KID:   rkey.ID,
+				KID:    rkey.ID,
 				KField: field,
-				KVal:  []byte(strconv.Itoa(delta)),
+				KVal:   []byte(strconv.Itoa(delta)),
 			}
 			return tx.Create(&rhash).Error
 
@@ -250,9 +249,9 @@ func (d *DB) Incr(key, field string, delta int) (int, error) {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				newVal = delta
 				rhash := store.RHash{
-					KID:   rkey.ID,
+					KID:    rkey.ID,
 					KField: field,
-					KVal:  []byte(strconv.Itoa(delta)),
+					KVal:   []byte(strconv.Itoa(delta)),
 				}
 				if err := tx.Create(&rhash).Error; err != nil {
 					return err
@@ -293,10 +292,9 @@ func (d *DB) Incr(key, field string, delta int) (int, error) {
 
 // IncrFloat increments the float value of a field by delta.
 func (d *DB) IncrFloat(key, field string, delta float64) (float64, error) {
-	now := time.Now().UnixMilli()
-
 	var newVal float64
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -319,9 +317,9 @@ func (d *DB) IncrFloat(key, field string, delta float64) (float64, error) {
 			}
 			newVal = delta
 			rhash := store.RHash{
-				KID:   rkey.ID,
+				KID:    rkey.ID,
 				KField: field,
-				KVal:  []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
+				KVal:   []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
 			}
 			return tx.Create(&rhash).Error
 
@@ -337,9 +335,9 @@ func (d *DB) IncrFloat(key, field string, delta float64) (float64, error) {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				newVal = delta
 				rhash := store.RHash{
-					KID:   rkey.ID,
+					KID:    rkey.ID,
 					KField: field,
-					KVal:  []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
+					KVal:   []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
 				}
 				if err := tx.Create(&rhash).Error; err != nil {
 					return err
@@ -449,6 +447,7 @@ func (d *DB) RandFields(key string, count int) ([]HashItem, error) {
 }
 
 // Scan iterates over hash fields matching pattern.
+// Uses database-level pagination for better performance and consistency.
 func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult, error) {
 	if count <= 0 {
 		count = scanPageSize
@@ -456,32 +455,36 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 
 	now := time.Now().UnixMilli()
 	var results []store.RHash
-	err := d.store.DB.Model(&store.RHash{}).
+
+	// Use database-level pagination with cursor-based approach
+	query := d.store.DB.Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
-		Find(&results).Error
+		Order("rhash.id ASC"). // Ensure consistent ordering
+		Limit(count)
+
+	// Cursor-based pagination: get records with ID > cursor
+	if cursor > 0 {
+		query = query.Where("rhash.id > ?", cursor)
+	}
+
+	err := query.Find(&results).Error
 	if err != nil {
 		return ScanResult{}, err
 	}
 
-	start := cursor
-	end := cursor + count
-	if end > len(results) {
-		end = len(results)
-	}
-	if start >= len(results) {
-		return ScanResult{Cursor: 0, Items: []HashItem{}}, nil
-	}
-
-	items := make([]HashItem, 0, count)
-	for i := start; i < end; i++ {
-		items = append(items, HashItem{Field: results[i].KField, Value: core.Value(results[i].KVal)})
+	// Convert results
+	items := make([]HashItem, len(results))
+	var nextCursor int
+	for i, r := range results {
+		items[i] = HashItem{Field: r.KField, Value: core.Value(r.KVal)}
+		nextCursor = r.ID // Use last ID as next cursor
 	}
 
-	nextCursor := 0
-	if end < len(results) {
-		nextCursor = end
+	// If we got fewer results than requested, we've reached the end
+	if len(results) < count {
+		nextCursor = 0
 	}
 
 	return ScanResult{Cursor: nextCursor, Items: items}, nil
@@ -574,10 +577,10 @@ func (d *DB) Set(key, field string, value any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	now := time.Now().UnixMilli()
 
 	var created bool
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -599,9 +602,9 @@ func (d *DB) Set(key, field string, value any) (bool, error) {
 				return err
 			}
 			rhash := store.RHash{
-				KID:   rkey.ID,
+				KID:    rkey.ID,
 				KField: field,
-				KVal:  vb,
+				KVal:   vb,
 			}
 			if err := tx.Create(&rhash).Error; err != nil {
 				return err
@@ -621,9 +624,9 @@ func (d *DB) Set(key, field string, value any) (bool, error) {
 
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				rhash := store.RHash{
-					KID:   rkey.ID,
+					KID:    rkey.ID,
 					KField: field,
-					KVal:  vb,
+					KVal:   vb,
 				}
 				if err := tx.Create(&rhash).Error; err != nil {
 					return err
@@ -674,10 +677,10 @@ func (d *DB) SetMany(key string, items map[string]any) (int, error) {
 		values[k] = vb
 	}
 
-	now := time.Now().UnixMilli()
 	var newCount int
 
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -724,9 +727,9 @@ func (d *DB) SetMany(key string, items map[string]any) (int, error) {
 
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				rhash = store.RHash{
-					KID:   rkey.ID,
+					KID:    rkey.ID,
 					KField: field,
-					KVal:  val,
+					KVal:   val,
 				}
 				if err := tx.Create(&rhash).Error; err != nil {
 					return err
@@ -859,10 +862,10 @@ func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	now := time.Now().UnixMilli()
 
 	var created bool
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -884,9 +887,9 @@ func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
 				return err
 			}
 			rhash := store.RHash{
-				KID:   rkey.ID,
+				KID:    rkey.ID,
 				KField: field,
-				KVal:  vb,
+				KVal:   vb,
 			}
 			if err := tx.Create(&rhash).Error; err != nil {
 				return err
@@ -906,9 +909,9 @@ func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
 
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				rhash := store.RHash{
-					KID:   rkey.ID,
+					KID:    rkey.ID,
 					KField: field,
-					KVal:  vb,
+					KVal:   vb,
 				}
 				if err := tx.Create(&rhash).Error; err != nil {
 					return err

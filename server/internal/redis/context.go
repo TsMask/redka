@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"sync"
 
 	"github.com/tidwall/redcon"
 	"github.com/tsmask/redka/config"
@@ -22,6 +23,7 @@ const (
 type ConnWriter struct {
 	conn redcon.Conn
 	ctx  map[string]any
+	mu   sync.RWMutex // Protects concurrent access to ctx
 }
 
 // NewConnWriter creates a ConnWriter from a redcon.Conn.
@@ -39,11 +41,15 @@ func NewConnWriter(conn redcon.Conn) *ConnWriter {
 
 // Context returns the value for the given key from the connection context.
 func (w *ConnWriter) Context(key string) any {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	return w.ctx[key]
 }
 
 // SetContext sets the value for the given key in the connection context.
 func (w *ConnWriter) SetContext(key string, v any) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.ctx[key] = v
 }
 

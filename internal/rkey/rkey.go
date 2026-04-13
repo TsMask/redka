@@ -117,11 +117,16 @@ func (d *DB) DeleteExpired(n int) (count int, err error) {
 		if len(expiredIDs) == 0 {
 			return 0, nil
 		}
-		result := d.store.DB.Where("id IN ?", expiredIDs).Delete(&store.RKey{})
-		if result.Error != nil {
-			return 0, result.Error
-		}
-		return int(result.RowsAffected), nil
+		// Use transaction to ensure delete operations are isolated
+		err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+			result := tx.Where("id IN ?", expiredIDs).Delete(&store.RKey{})
+			if result.Error != nil {
+				return result.Error
+			}
+			count = int(result.RowsAffected)
+			return nil
+		})
+		return count, err
 	}
 
 	result := d.store.DB.Scopes(expiredScope).Delete(&store.RKey{})
@@ -149,10 +154,10 @@ func (d *DB) Expire(key string, ttl time.Duration) error {
 // the key is expired and no longer exists.
 // If the key does not exist, returns ErrNotFound.
 func (d *DB) ExpireAt(key string, at time.Time) error {
-	now := time.Now().UnixMilli()
 	etime := at.UnixMilli()
 
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		result := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
@@ -241,9 +246,8 @@ func (d *DB) Len() (int, error) {
 // Persist removes the expiration time for the key.
 // If the key does not exist, returns ErrNotFound.
 func (d *DB) Persist(key string) error {
-	now := time.Now().UnixMilli()
-
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		result := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
@@ -295,8 +299,8 @@ func (d *DB) Rename(key, newKey string) error {
 		return nil
 	}
 
-	now := time.Now().UnixMilli()
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var oldK store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -346,9 +350,9 @@ func (d *DB) RenameNotExists(key, newKey string) (bool, error) {
 		return false, nil
 	}
 
-	now := time.Now().UnixMilli()
 	var renamed bool
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var oldK store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).

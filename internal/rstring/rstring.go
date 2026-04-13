@@ -99,10 +99,9 @@ func (d *DB) GetMany(keys ...string) (map[string]core.Value, error) {
 //
 // Uses SELECT FOR UPDATE to prevent race conditions in concurrent access.
 func (d *DB) Incr(key string, delta int) (int, error) {
-	now := time.Now().UnixMilli()
-
 	var newVal int
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -185,10 +184,9 @@ func (d *DB) Incr(key string, delta int) (int, error) {
 // If the key value is not an float, returns ErrValueType.
 // If the key exists but is not a string, returns ErrKeyType.
 func (d *DB) IncrFloat(key string, delta float64) (float64, error) {
-	now := time.Now().UnixMilli()
-
 	var newVal float64
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -273,9 +271,9 @@ func (d *DB) Set(key string, value any) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now().UnixMilli()
 
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -340,15 +338,15 @@ func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now().UnixMilli()
-
-	var expireAt *int64
-	if ttl > 0 {
-		expire := now + ttl.Milliseconds()
-		expireAt = &expire
-	}
 
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
+		var expireAt *int64
+		if ttl > 0 {
+			expire := now + ttl.Milliseconds()
+			expireAt = &expire
+		}
+
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -430,9 +428,8 @@ func (d *DB) SetMany(items map[string]any) error {
 		keyNames = append(keyNames, k)
 	}
 
-	now := time.Now().UnixMilli()
-
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var existingKeys []store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname IN ?", d.dbIdx, keyNames).
@@ -589,9 +586,9 @@ func (cmd SetCmd) KeepTTL() SetCmd {
 
 // SetResult represents the result of a SET operation.
 type SetResult struct {
-	Updated  bool
-	Created  bool
-	Prev     core.Value
+	Updated bool
+	Created bool
+	Prev    core.Value
 }
 
 // Run executes the set command with the configured options.
@@ -648,14 +645,16 @@ func (cmd SetCmd) Run() (SetResult, error) {
 	}
 
 	if cmd.ifNX {
-		err := cmd.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		err := cmd.db.store.Transaction(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
 			now := time.Now().UnixMilli()
 			var rkey store.RKey
 			err := tx.Model(&store.RKey{}).
 				Where("kdb = ? AND kname = ?", cmd.db.dbIdx, cmd.key).
 				Scopes(store.NotExpired(now)).
+				Clauses(store.ForUpdate()).
 				First(&rkey).Error
 			if err == nil {
+				// Key exists, NX should not overwrite
 				return nil
 			}
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -676,6 +675,11 @@ func (cmd SetCmd) Run() (SetResult, error) {
 				KLen:       1,
 			}
 			if err := tx.Create(&rkey).Error; err != nil {
+				// Handle unique constraint violation (key was created by another
+				// concurrent NX operation between our check and create)
+				if dialect.ConstraintFailed(err, "unique", "rkey", "kname") {
+					return nil // Key already exists, NX semantics: don't overwrite
+				}
 				return err
 			}
 

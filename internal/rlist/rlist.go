@@ -12,6 +12,12 @@ import (
 	"gorm.io/gorm"
 )
 
+// listPositionInterval is the interval between list positions.
+// Using a larger interval (1000) reduces the frequency of position
+// reallocation during LINSERT operations, significantly improving
+// performance in high-concurrency scenarios.
+const listPositionInterval = 1000
+
 // DB is a database-backed list repository.
 // A list is an ordered collection of strings.
 // Use the list repository to work with individual lists
@@ -180,10 +186,9 @@ func (d *DB) Len(key string) (int, error) {
 
 // PopBack removes and returns the last element from a list.
 func (d *DB) PopBack(key string) (core.Value, error) {
-	now := time.Now().UnixMilli()
-
 	var elem []byte
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
@@ -237,10 +242,9 @@ func (d *DB) PopBack(key string) (core.Value, error) {
 
 // PopFront removes and returns the first element from a list.
 func (d *DB) PopFront(key string) (core.Value, error) {
-	now := time.Now().UnixMilli()
-
 	var elem []byte
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
@@ -295,10 +299,9 @@ func (d *DB) PopFront(key string) (core.Value, error) {
 // PopBackPushFront removes the last element from src list
 // and prepends it to dest list. Returns the popped element.
 func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
-	now := time.Now().UnixMilli()
-
 	var elem []byte
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var srcKey store.RKey
 		if err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
@@ -367,10 +370,12 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 		}
 
 		var minPos *int64
-		tx.Model(&store.RList{}).
+		if err := tx.Model(&store.RList{}).
 			Select("MIN(pos)").
 			Where("kid = ?", destKey.ID).
-			Scan(&minPos)
+			Scan(&minPos).Error; err != nil {
+			return err
+		}
 
 		newPos := int64(0)
 		if minPos != nil {
@@ -472,9 +477,9 @@ func (d *DB) Set(key string, idx int, elem any) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now().UnixMilli()
 
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
@@ -531,9 +536,8 @@ func (d *DB) Set(key string, idx int, elem any) error {
 
 // Trim trims a list so that it contains only the specified range of elements.
 func (d *DB) Trim(key string, start, stop int) error {
-	now := time.Now().UnixMilli()
-
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
@@ -615,10 +619,10 @@ func (d *DB) delete(key string, elem any, count int, fromBack bool) (int, error)
 	if err != nil {
 		return 0, err
 	}
-	now := time.Now().UnixMilli()
 
 	var deleted int64
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id").
@@ -685,10 +689,10 @@ func (d *DB) insert(key string, pivot any, elem any, after bool) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	now := time.Now().UnixMilli()
 
 	var newLen int64
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
@@ -779,10 +783,12 @@ func (d *DB) insert(key string, pivot any, elem any, after bool) (int, error) {
 				"klen":        gorm.Expr("klen + 1"),
 			})
 
-		tx.Model(&store.RKey{}).
+		if err := tx.Model(&store.RKey{}).
 			Select("klen").
 			Where("id = ?", rkey.ID).
-			Scan(&newLen)
+			Scan(&newLen).Error; err != nil {
+			return err
+		}
 
 		return nil
 	})
@@ -795,10 +801,10 @@ func (d *DB) push(key string, elem any, back bool) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	now := time.Now().UnixMilli()
 
 	var newLen int64
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "ktype", "klen").
@@ -839,21 +845,29 @@ func (d *DB) push(key string, elem any, back bool) (int, error) {
 		var newPos int64
 		if back {
 			var maxPos *int64
-			tx.Model(&store.RList{}).
+			if err := tx.Model(&store.RList{}).
 				Select("MAX(pos)").
 				Where("kid = ?", rkey.ID).
-				Scan(&maxPos)
+				Scan(&maxPos).Error; err != nil {
+				return err
+			}
 			if maxPos != nil {
-				newPos = *maxPos + 1
+				newPos = *maxPos + listPositionInterval // Use larger interval to reduce reallocation
+			} else {
+				newPos = listPositionInterval // First element
 			}
 		} else {
 			var minPos *int64
-			tx.Model(&store.RList{}).
+			if err := tx.Model(&store.RList{}).
 				Select("MIN(pos)").
 				Where("kid = ?", rkey.ID).
-				Scan(&minPos)
+				Scan(&minPos).Error; err != nil {
+				return err
+			}
 			if minPos != nil {
-				newPos = *minPos - 1
+				newPos = *minPos - listPositionInterval // Use larger interval to reduce reallocation
+			} else {
+				newPos = listPositionInterval // First element
 			}
 		}
 
@@ -871,10 +885,12 @@ func (d *DB) push(key string, elem any, back bool) (int, error) {
 				"klen": gorm.Expr("klen + 1"),
 			})
 
-		tx.Model(&store.RKey{}).
+		if err := tx.Model(&store.RKey{}).
 			Select("klen").
 			Where("id = ?", rkey.ID).
-			Scan(&newLen)
+			Scan(&newLen).Error; err != nil {
+			return err
+		}
 
 		return nil
 	})

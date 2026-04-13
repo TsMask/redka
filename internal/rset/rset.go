@@ -82,10 +82,10 @@ func (d *DB) Add(key string, elems ...any) (int, error) {
 		return 0, err
 	}
 
-	now := time.Now().UnixMilli()
 	newCount := 0
 
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
@@ -197,6 +197,12 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 
 // Diff returns the difference between the first set and the rest.
 func (d *DB) Diff(keys ...string) ([]core.Value, error) {
+	return d.diffTx(d.store.DB, keys...)
+}
+
+// diffTx computes the difference of sets within a transaction.
+// Used internally by DiffStore to ensure atomicity.
+func (d *DB) diffTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
@@ -204,7 +210,7 @@ func (d *DB) Diff(keys ...string) ([]core.Value, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RSet
 
-	err := d.store.DB.Model(&store.RSet{}).
+	err := db.Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, keys[0]).
 		Scopes(store.NotExpired(now)).
@@ -224,7 +230,7 @@ func (d *DB) Diff(keys ...string) ([]core.Value, error) {
 
 	for _, key := range keys[1:] {
 		var results []store.RSet
-		err := d.store.DB.Model(&store.RSet{}).
+		err := db.Model(&store.RSet{}).
 			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
 			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
@@ -245,20 +251,24 @@ func (d *DB) Diff(keys ...string) ([]core.Value, error) {
 }
 
 // DiffStore calculates the difference and stores the result in a destination set.
+// The difference calculation and storage are performed within the same
+// transaction to ensure atomicity.
 func (d *DB) DiffStore(dest string, keys ...string) (int, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
 
-	items, err := d.Diff(keys...)
-	if err != nil {
-		return 0, err
-	}
+	var resultCount int
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
+		// Calculate difference within the same transaction for atomicity
+		items, err := d.diffTx(tx, keys...)
+		if err != nil {
+			return err
+		}
 
-	now := time.Now().UnixMilli()
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
 		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
+		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
 			Scopes(store.NotExpired(now)).
 			First(&rkey).Error
@@ -291,10 +301,15 @@ func (d *DB) DiffStore(dest string, keys ...string) (int, error) {
 		for i, item := range items {
 			rsets[i] = store.RSet{KID: rkey.ID, Elem: []byte(item)}
 		}
-		return tx.Create(&rsets).Error
+		if err := tx.Create(&rsets).Error; err != nil {
+			return err
+		}
+
+		resultCount = len(items)
+		return nil
 	})
 
-	return len(items), err
+	return resultCount, err
 }
 
 // Exists reports whether the element belongs to a set.
@@ -319,6 +334,12 @@ func (d *DB) Exists(key string, elem any) (bool, error) {
 
 // Inter returns the intersection of multiple sets.
 func (d *DB) Inter(keys ...string) ([]core.Value, error) {
+	return d.interTx(d.store.DB, keys...)
+}
+
+// interTx computes the intersection of sets within a transaction.
+// Used internally by InterStore to ensure atomicity.
+func (d *DB) interTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
@@ -326,7 +347,7 @@ func (d *DB) Inter(keys ...string) ([]core.Value, error) {
 	now := time.Now().UnixMilli()
 
 	var results []store.RSet
-	err := d.store.DB.Model(&store.RSet{}).
+	err := db.Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, keys[0]).
 		Scopes(store.NotExpired(now)).
@@ -346,7 +367,7 @@ func (d *DB) Inter(keys ...string) ([]core.Value, error) {
 
 	for _, key := range keys[1:] {
 		var results []store.RSet
-		err := d.store.DB.Model(&store.RSet{}).
+		err := db.Model(&store.RSet{}).
 			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
 			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
@@ -375,20 +396,24 @@ func (d *DB) Inter(keys ...string) ([]core.Value, error) {
 }
 
 // InterStore intersects multiple sets and stores the result in a destination set.
+// The intersection calculation and storage are performed within the same
+// transaction to ensure atomicity.
 func (d *DB) InterStore(dest string, keys ...string) (int, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
 
-	items, err := d.Inter(keys...)
-	if err != nil {
-		return 0, err
-	}
+	var resultCount int
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
+		// Calculate intersection within the same transaction for atomicity
+		items, err := d.interTx(tx, keys...)
+		if err != nil {
+			return err
+		}
 
-	now := time.Now().UnixMilli()
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
 		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
+		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
 			Scopes(store.NotExpired(now)).
 			First(&rkey).Error
@@ -421,10 +446,15 @@ func (d *DB) InterStore(dest string, keys ...string) (int, error) {
 		for i, item := range items {
 			rsets[i] = store.RSet{KID: rkey.ID, Elem: []byte(item)}
 		}
-		return tx.Create(&rsets).Error
+		if err := tx.Create(&rsets).Error; err != nil {
+			return err
+		}
+
+		resultCount = len(items)
+		return nil
 	})
 
-	return len(items), err
+	return resultCount, err
 }
 
 // InterCard returns the number of elements in the intersection of multiple sets.
@@ -706,6 +736,7 @@ func (d *DB) RandMember(key string, count int) ([]core.Value, error) {
 }
 
 // Scan iterates over set elements matching pattern.
+// Uses database-level pagination for better performance and consistency.
 func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult, error) {
 	if count <= 0 {
 		count = scanPageSize
@@ -713,32 +744,36 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 
 	now := time.Now().UnixMilli()
 	var results []store.RSet
-	err := d.store.DB.Model(&store.RSet{}).
+
+	// Use database-level pagination with cursor-based approach
+	query := d.store.DB.Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
-		Find(&results).Error
+		Order("rset.id ASC"). // Ensure consistent ordering
+		Limit(count)
+
+	// Cursor-based pagination: get records with ID > cursor
+	if cursor > 0 {
+		query = query.Where("rset.id > ?", cursor)
+	}
+
+	err := query.Find(&results).Error
 	if err != nil {
 		return ScanResult{}, err
 	}
 
-	start := cursor
-	end := cursor + count
-	if end > len(results) {
-		end = len(results)
-	}
-	if start >= len(results) {
-		return ScanResult{Cursor: 0, Items: []core.Value{}}, nil
-	}
-
-	items := make([]core.Value, 0, count)
-	for i := start; i < end; i++ {
-		items = append(items, core.Value(results[i].Elem))
+	// Convert results
+	items := make([]core.Value, len(results))
+	var nextCursor int
+	for i, r := range results {
+		items[i] = core.Value(r.Elem)
+		nextCursor = r.ID // Use last ID as next cursor
 	}
 
-	nextCursor := 0
-	if end < len(results) {
-		nextCursor = end
+	// If we got fewer results than requested, we've reached the end
+	if len(results) < count {
+		nextCursor = 0
 	}
 
 	return ScanResult{Cursor: nextCursor, Items: items}, nil
@@ -826,6 +861,12 @@ func (s *Scanner) Err() error {
 
 // Union returns the union of multiple sets.
 func (d *DB) Union(keys ...string) ([]core.Value, error) {
+	return d.unionTx(d.store.DB, keys...)
+}
+
+// unionTx computes the union of sets within a transaction.
+// Used internally by UnionStore to ensure atomicity.
+func (d *DB) unionTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
@@ -835,7 +876,7 @@ func (d *DB) Union(keys ...string) ([]core.Value, error) {
 
 	for _, key := range keys {
 		var results []store.RSet
-		err := d.store.DB.Model(&store.RSet{}).
+		err := db.Model(&store.RSet{}).
 			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
 			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
@@ -856,20 +897,24 @@ func (d *DB) Union(keys ...string) ([]core.Value, error) {
 }
 
 // UnionStore unions multiple sets and stores the result in a destination set.
+// The union calculation and storage are performed within the same
+// transaction to ensure atomicity.
 func (d *DB) UnionStore(dest string, keys ...string) (int, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
 
-	items, err := d.Union(keys...)
-	if err != nil {
-		return 0, err
-	}
+	var resultCount int
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
+		// Calculate union within the same transaction for atomicity
+		items, err := d.unionTx(tx, keys...)
+		if err != nil {
+			return err
+		}
 
-	now := time.Now().UnixMilli()
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
 		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
+		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
 			Scopes(store.NotExpired(now)).
 			First(&rkey).Error
@@ -902,8 +947,13 @@ func (d *DB) UnionStore(dest string, keys ...string) (int, error) {
 		for i, item := range items {
 			rsets[i] = store.RSet{KID: rkey.ID, Elem: []byte(item)}
 		}
-		return tx.Create(&rsets).Error
+		if err := tx.Create(&rsets).Error; err != nil {
+			return err
+		}
+
+		resultCount = len(items)
+		return nil
 	})
 
-	return len(items), err
+	return resultCount, err
 }
