@@ -12,9 +12,13 @@ import (
 // FlagConfig reads the configuration from
 // command line arguments and environment variables.
 func FlagConfig() *ServerConfig {
+	// Start with default config
 	cfg := DefaultConfig()
 	var portStr string
 	var configFile string
+	var hostFlag, portFlag, sockFlag, passwordFlag bool
+
+	// Track which flags were explicitly set
 	flag.StringVar(
 		&cfg.Host, "h",
 		cmp.Or(os.Getenv("REDKA_HOST"), "localhost"),
@@ -42,8 +46,20 @@ func FlagConfig() *ServerConfig {
 	)
 	flag.BoolVar(&cfg.Verbose, "v", false, "verbose logging")
 	flag.Parse()
-	// Parse port
-	cfg.Port = parsePortOrExit(portStr)
+
+	// Track which flags were explicitly set via command line
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "h":
+			hostFlag = true
+		case "p":
+			portFlag = true
+		case "s":
+			sockFlag = true
+		case "a":
+			passwordFlag = true
+		}
+	})
 
 	// Load configuration from file if specified
 	if configFile != "" {
@@ -52,29 +68,49 @@ func FlagConfig() *ServerConfig {
 			slog.Error("Failed to load config file", "error", err)
 			os.Exit(1)
 		}
-		// Command line arguments override file config
-		if v := os.Getenv("REDKA_HOST"); v != "" {
-			fileConfig.Host = v
-		}
-		if v := os.Getenv("REDKA_PORT"); v != "" {
-			fileConfig.Port = parsePortOrExit(v)
-		}
-		if v := os.Getenv("REDKA_SOCK"); v != "" {
-			fileConfig.Sock = v
-		}
-		if v := os.Getenv("REDKA_PASSWORD"); v != "" {
-			fileConfig.Password = v
-		}
-		if v := os.Getenv("REDKA_DB_DSN"); v != "" {
-			fileConfig.DBDSN = v
-		}
-
-		// Validate and use file config
-		if err := fileConfig.Validate(); err != nil {
-			slog.Error("Invalid configuration", "error", err)
-			os.Exit(1)
-		}
 		cfg = fileConfig
+	}
+
+	// Command line arguments override file config and environment variables
+	if hostFlag {
+		// Get the actual value from flag
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "h" {
+				cfg.Host = f.Value.String()
+			}
+		})
+	}
+
+	if portFlag {
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "p" {
+				cfg.Port = parsePortOrExit(f.Value.String())
+			}
+		})
+	}
+
+	if sockFlag {
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "s" {
+				cfg.Sock = f.Value.String()
+			}
+		})
+	}
+
+	if passwordFlag {
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "a" {
+				cfg.Password = f.Value.String()
+			}
+		})
+	} else if v := os.Getenv("REDKA_PASSWORD"); v != "" {
+		cfg.Password = v
+	}
+
+	// Validate final config
+	if err := cfg.Validate(); err != nil {
+		slog.Error("Invalid configuration", "error", err)
+		os.Exit(1)
 	}
 
 	return cfg
