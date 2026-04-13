@@ -186,30 +186,66 @@ func (d *DB) AddMany(key string, items map[any]float64) (int, error) {
 			return core.ErrKeyType
 		}
 
+		// 转换所有元素为字节
+		elems := make(map[string]float64, len(items))
 		for elem, score := range items {
 			elemb, err := core.ToBytes(elem)
 			if err != nil {
 				return err
 			}
+			elems[string(elemb)] = score
+		}
 
-			var existing store.RZSet
-			err = tx.Where("kid = ? AND elem = ?", rkey.ID, elemb).First(&existing).Error
+		// 批量查询已存在的元素，避免 N+1 查询
+		elemBytes := make([][]byte, 0, len(elems))
+		for elemb := range elems {
+			elemBytes = append(elemBytes, []byte(elemb))
+		}
 
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				rzset := store.RZSet{
-					KID:   rkey.ID,
-					Elem:  elemb,
-					Score: score,
-				}
-				if err := tx.Create(&rzset).Error; err != nil {
-					return err
-				}
-				created++
-			} else if err != nil {
-				return err
-			} else {
+		var existingElems []store.RZSet
+		err = tx.Where("kid = ? AND elem IN ?", rkey.ID, elemBytes).Find(&existingElems).Error
+		if err != nil {
+			return err
+		}
+
+		// 构建已存在元素的映射
+		existingMap := make(map[string]*store.RZSet, len(existingElems))
+		for i := range existingElems {
+			existingMap[string(existingElems[i].Elem)] = &existingElems[i]
+		}
+
+		// 分离新增和更新的元素
+		var newElems []store.RZSet
+		var updateElems []store.RZSet
+		created = 0
+
+		for elemb, score := range elems {
+			if existing, ok := existingMap[elemb]; ok {
+				// 元素已存在，准备更新分数
 				existing.Score = score
-				if err := tx.Save(&existing).Error; err != nil {
+				updateElems = append(updateElems, *existing)
+			} else {
+				// 元素不存在，准备插入
+				newElems = append(newElems, store.RZSet{
+					KID:   rkey.ID,
+					Elem:  []byte(elemb),
+					Score: score,
+				})
+				created++
+			}
+		}
+
+		// 批量插入新元素
+		if len(newElems) > 0 {
+			if err := tx.Create(&newElems).Error; err != nil {
+				return err
+			}
+		}
+
+		// 批量更新现有元素的分数
+		if len(updateElems) > 0 {
+			for i := range updateElems {
+				if err := tx.Save(&updateElems[i]).Error; err != nil {
 					return err
 				}
 			}

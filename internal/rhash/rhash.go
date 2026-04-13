@@ -709,42 +709,57 @@ func (d *DB) SetMany(key string, items map[string]any) (int, error) {
 			return core.ErrKeyType
 		}
 
+		// 批量查询所有现有字段，避免 N+1 查询
 		var existingFields []store.RHash
 		err = tx.Where("kid = ?", rkey.ID).Find(&existingFields).Error
 		if err != nil {
 			return err
 		}
 
-		existingMap := make(map[string]bool)
-		for _, f := range existingFields {
-			existingMap[f.KField] = true
+		// 构建已存在字段的 map
+		existingMap := make(map[string]*store.RHash, len(existingFields))
+		for i := range existingFields {
+			existingMap[existingFields[i].KField] = &existingFields[i]
 		}
 
+		// 分离新增和更新的字段
+		var newFields []store.RHash
+		var updateFields []store.RHash
 		newCount = 0
-		for field, val := range values {
-			var rhash store.RHash
-			err = tx.Where("kid = ? AND kfield = ?", rkey.ID, field).First(&rhash).Error
 
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				rhash = store.RHash{
+		for field, val := range values {
+			if existing, ok := existingMap[field]; ok {
+				// 字段已存在，准备更新
+				existing.KVal = val
+				updateFields = append(updateFields, *existing)
+			} else {
+				// 字段不存在，准备插入
+				newFields = append(newFields, store.RHash{
 					KID:    rkey.ID,
 					KField: field,
 					KVal:   val,
-				}
-				if err := tx.Create(&rhash).Error; err != nil {
-					return err
-				}
+				})
 				newCount++
-			} else if err != nil {
+			}
+		}
+
+		// 批量插入新字段
+		if len(newFields) > 0 {
+			if err := tx.Create(&newFields).Error; err != nil {
 				return err
-			} else {
-				rhash.KVal = val
-				if err := tx.Save(&rhash).Error; err != nil {
+			}
+		}
+
+		// 批量更新现有字段
+		if len(updateFields) > 0 {
+			for i := range updateFields {
+				if err := tx.Save(&updateFields[i]).Error; err != nil {
 					return err
 				}
 			}
 		}
 
+		// 更新键的长度
 		return tx.Model(&store.RKey{}).
 			Where("id = ?", rkey.ID).
 			Updates(map[string]interface{}{

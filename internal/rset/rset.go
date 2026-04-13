@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"sort"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -119,23 +120,38 @@ func (d *DB) Add(key string, elems ...any) (int, error) {
 			return err
 		}
 
+		// 批量查询已存在的元素，避免 N+1 查询
+		var existingElems []store.RSet
+		err = tx.Where("kid = ? AND elem IN ?", rkey.ID, elembs).Find(&existingElems).Error
+		if err != nil {
+			return err
+		}
+
+		// 构建已存在元素的集合
+		existMap := make(map[string]bool, len(existingElems))
+		for _, e := range existingElems {
+			existMap[string(e.Elem)] = true
+		}
+
+		// 批量插入新元素
+		var newElems []store.RSet
 		for _, elem := range elembs {
-			var existing store.RSet
-			err := tx.Where("kid = ? AND elem = ?", rkey.ID, elem).First(&existing).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				if err := tx.Create(&store.RSet{KID: rkey.ID, Elem: elem}).Error; err != nil {
-					return err
-				}
+			if !existMap[string(elem)] {
+				newElems = append(newElems, store.RSet{KID: rkey.ID, Elem: elem})
 				newCount++
-				rkey.KLen++
-			} else if err != nil {
+			}
+		}
+
+		if len(newElems) > 0 {
+			if err := tx.Create(&newElems).Error; err != nil {
 				return err
 			}
 		}
 
+		// 更新键的长度
 		return tx.Model(&store.RKey{}).
 			Where("id = ?", rkey.ID).
-			Update("klen", rkey.KLen).Error
+			Update("klen", gorm.Expr("klen + ?", newCount)).Error
 	})
 
 	return newCount, err
@@ -551,19 +567,98 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
 		now := time.Now().UnixMilli()
 
-		var srcKey store.RKey
+		// 死锁预防：按键名排序后加锁，确保固定的锁定顺序
+		// 这样可以避免两个并发事务以相反顺序锁定相同的键而导致死锁
+		keys := []string{src, dest}
+		sort.Strings(keys)
+		firstKey := keys[0]
+		secondKey := keys[1]
+
+		// 按排序后的顺序锁定键
+		var firstKeyRecord store.RKey
 		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, src, keyTypeSet).
+			Where("kdb = ? AND kname = ?", d.dbIdx, firstKey).
 			Scopes(store.NotExpired(now)).
 			Clauses(store.ForUpdate()).
-			First(&srcKey).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return core.ErrNotFound
-		}
-		if err != nil {
-			return err
+			First(&firstKeyRecord).Error
+
+		// 根据 firstKey 是 src 还是 dest 来处理
+		var srcKey store.RKey
+		var destKey store.RKey
+
+		if firstKey == src {
+			// firstKey 是 src
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return core.ErrNotFound
+			}
+			if err != nil {
+				return err
+			}
+			if firstKeyRecord.KType != keyTypeSet {
+				return core.ErrKeyType
+			}
+			srcKey = firstKeyRecord
+
+			// 检查 dest 是否存在
+			err = tx.Model(&store.RKey{}).
+				Where("kdb = ? AND kname = ?", d.dbIdx, secondKey).
+				Scopes(store.NotExpired(now)).
+				Clauses(store.ForUpdate()).
+				First(&destKey).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				destKey = store.RKey{
+					KDB:        d.dbIdx,
+					KName:      dest,
+					KType:      keyTypeSet,
+					KVer:       1,
+					ModifiedAt: now,
+					KLen:       0,
+				}
+				if err := tx.Create(&destKey).Error; err != nil {
+					return err
+				}
+			} else if err != nil {
+				return err
+			} else if destKey.KType != keyTypeSet {
+				return core.ErrKeyType
+			}
+		} else {
+			// firstKey 是 dest
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// dest 不存在，创建它
+				destKey = store.RKey{
+					KDB:        d.dbIdx,
+					KName:      dest,
+					KType:      keyTypeSet,
+					KVer:       1,
+					ModifiedAt: now,
+					KLen:       0,
+				}
+				if err := tx.Create(&destKey).Error; err != nil {
+					return err
+				}
+			} else if err != nil {
+				return err
+			} else if destKey.KType != keyTypeSet {
+				return core.ErrKeyType
+			}
+			destKey = firstKeyRecord
+
+			// 检查 src 是否存在
+			err = tx.Model(&store.RKey{}).
+				Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, secondKey, keyTypeSet).
+				Scopes(store.NotExpired(now)).
+				Clauses(store.ForUpdate()).
+				First(&srcKey).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return core.ErrNotFound
+			}
+			if err != nil {
+				return err
+			}
 		}
 
+		// 检查源集合中是否存在该元素
 		var srcSet store.RSet
 		err = tx.Where("kid = ? AND elem = ?", srcKey.ID, elemb).First(&srcSet).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -573,44 +668,29 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 			return err
 		}
 
-		var destKey store.RKey
-		err = tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
-			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
-			First(&destKey).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			destKey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      dest,
-				KType:      keyTypeSet,
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       0,
-			}
-			if err := tx.Create(&destKey).Error; err != nil {
-				return err
-			}
-		} else if err != nil {
-			return err
-		} else if destKey.KType != keyTypeSet {
-			return core.ErrKeyType
-		}
-
+		// 检查目标集合中是否已存在该元素
 		var existing store.RSet
 		err = tx.Where("kid = ? AND elem = ?", destKey.ID, elemb).First(&existing).Error
 		if err == nil {
+			// 元素已存在于目标集合，只需从源集合删除
 			if err := tx.Where("kid = ? AND elem = ?", srcKey.ID, elemb).
 				Delete(&store.RSet{}).Error; err != nil {
 				return err
 			}
 			moved = true
-			return nil
+			return tx.Model(&store.RKey{}).
+				Where("id = ?", srcKey.ID).
+				Updates(map[string]interface{}{
+					"kver":        gorm.Expr("kver + 1"),
+					"modified_at": now,
+					"klen":        gorm.Expr("klen - 1"),
+				}).Error
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 
+		// 元素不存在于目标集合，移动元素
 		if err := tx.Create(&store.RSet{KID: destKey.ID, Elem: elemb}).Error; err != nil {
 			return err
 		}
@@ -619,6 +699,7 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 			return err
 		}
 
+		// 更新两个键的长度
 		if err := tx.Model(&store.RKey{}).
 			Where("id = ?", destKey.ID).
 			Update("klen", gorm.Expr("klen + 1")).Error; err != nil {
@@ -628,7 +709,11 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 		moved = true
 		return tx.Model(&store.RKey{}).
 			Where("id = ?", srcKey.ID).
-			Update("klen", gorm.Expr("klen - 1")).Error
+			Updates(map[string]interface{}{
+				"kver":        gorm.Expr("kver + 1"),
+				"modified_at": now,
+				"klen":        gorm.Expr("klen - 1"),
+			}).Error
 	})
 
 	return moved, err

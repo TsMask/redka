@@ -5,6 +5,7 @@ package rlist
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -302,23 +303,103 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 	var elem []byte
 	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
 		now := time.Now().UnixMilli()
-		var srcKey store.RKey
+
+		// 死锁预防：按键名排序后加锁，确保固定的锁定顺序
+		// 这样可以避免两个并发事务以相反顺序锁定相同的键而导致死锁
+		keys := []string{src, dest}
+		sort.Strings(keys)
+		firstKey := keys[0]
+		secondKey := keys[1]
+
+		// 按排序后的顺序锁定键
+		var firstKeyRecord store.RKey
 		if err := tx.Model(&store.RKey{}).
-			Select("id", "klen").
-			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, src).
+			Select("id", "ktype", "klen").
+			Where("kdb = ? AND kname = ?", d.dbIdx, firstKey).
 			Scopes(store.NotExpired(now)).
 			Clauses(store.ForUpdate()).
-			First(&srcKey).Error; err != nil {
+			First(&firstKeyRecord).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// firstKey 不存在，创建它
+				firstKeyRecord = store.RKey{
+					KDB:        d.dbIdx,
+					KName:      firstKey,
+					KType:      2,
+					KVer:       1,
+					ModifiedAt: now,
+					KLen:       0,
+				}
+				if err := tx.Create(&firstKeyRecord).Error; err != nil {
+					return err
+				}
+			} else {
+				return err
+			}
+		}
+
+		// 根据 firstKey 是 src 还是 dest 来处理
+		var srcKey store.RKey
+		var destKey store.RKey
+
+		if firstKey == src {
+			// firstKey 是 src
+			if firstKeyRecord.KType != 2 {
+				return core.ErrKeyType
+			}
+			if firstKeyRecord.KLen == 0 {
 				return core.ErrNotFound
 			}
-			return err
+			srcKey = firstKeyRecord
+
+			// 检查或创建 dest
+			err := tx.Model(&store.RKey{}).
+				Select("id", "ktype", "klen").
+				Where("kdb = ? AND kname = ?", d.dbIdx, secondKey).
+				Scopes(store.NotExpired(now)).
+				Clauses(store.ForUpdate()).
+				First(&destKey).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				destKey = store.RKey{
+					KDB:        d.dbIdx,
+					KName:      dest,
+					KType:      2,
+					KVer:       1,
+					ModifiedAt: now,
+					KLen:       0,
+				}
+				if err := tx.Create(&destKey).Error; err != nil {
+					return err
+				}
+			} else if err != nil {
+				return err
+			} else if destKey.KType != 2 {
+				return core.ErrKeyType
+			}
+		} else {
+			// firstKey 是 dest
+			if firstKeyRecord.KType != 2 {
+				return core.ErrKeyType
+			}
+			destKey = firstKeyRecord
+
+			// 检查 src
+			err := tx.Model(&store.RKey{}).
+				Select("id", "ktype", "klen").
+				Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, secondKey).
+				Scopes(store.NotExpired(now)).
+				Clauses(store.ForUpdate()).
+				First(&srcKey).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return core.ErrNotFound
+			} else if err != nil {
+				return err
+			}
+			if srcKey.KLen == 0 {
+				return core.ErrNotFound
+			}
 		}
 
-		if srcKey.KLen == 0 {
-			return core.ErrNotFound
-		}
-
+		// 从源列表弹出最后一个元素
 		var srcElem store.RList
 		if err := tx.Where("kid = ?", srcKey.ID).
 			Order("pos DESC").
@@ -332,43 +413,17 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 			return err
 		}
 
-		tx.Model(&store.RKey{}).
+		if err := tx.Model(&store.RKey{}).
 			Where("id = ?", srcKey.ID).
 			Updates(map[string]any{
 				"kver":        gorm.Expr("kver + 1"),
 				"modified_at": now,
 				"klen":        gorm.Expr("klen - 1"),
-			})
-
-		var destKey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Select("id", "ktype", "klen").
-			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
-			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
-			First(&destKey).Error
-
-		switch {
-		case err == nil:
-			if destKey.KType != 2 {
-				return core.ErrKeyType
-			}
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			destKey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      dest,
-				KType:      2,
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       0,
-			}
-			if err := tx.Create(&destKey).Error; err != nil {
-				return err
-			}
-		default:
+			}).Error; err != nil {
 			return err
 		}
 
+		// 计算新位置（在目标列表前端）
 		var minPos *int64
 		if err := tx.Model(&store.RList{}).
 			Select("MIN(pos)").
@@ -382,6 +437,7 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 			newPos = *minPos - 1
 		}
 
+		// 插入到目标列表前端
 		if err := tx.Create(&store.RList{
 			KID:  destKey.ID,
 			Pos:  newPos,
@@ -390,6 +446,7 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 			return err
 		}
 
+		// 更新目标列表长度
 		return tx.Model(&store.RKey{}).
 			Where("id = ?", destKey.ID).
 			Updates(map[string]any{
