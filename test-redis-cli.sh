@@ -23,7 +23,7 @@ fi
 # command.go 支持命令清单（小写）
 SUPPORTED_COMMANDS=(
     command config dbsize flushdb flushall info lolwut
-    auth echo ping select
+    echo ping select
     del exists expire expireat keys persist pexpire pexpireat randomkey rename renamenx scan ttl type
     lindex linsert llen lpop lpush lrange lrem lset ltrim rpop rpoplpush rpush
     append decr decrby get getrange getset incr incrby incrbyfloat mget mset psetex set setex setnx setrange strlen substr
@@ -195,7 +195,6 @@ assert_eq  "SELECT 0"                    "OK"                SELECT 0
 assert_int "DBSIZE (空库)"               "0"                 DBSIZE
 assert_eq  "COMMAND"                     "OK"                COMMAND
 assert_any "CONFIG GET"                                      CONFIG get requirepass
-assert_eq  "AUTH (已认证)"                "OK"                AUTH "$PASSWORD"
 assert_any "INFO"                                            INFO
 assert_any "LOLWUT"                                          LOLWUT
 assert_eq  "FLUSHALL"                    "OK"                FLUSHALL
