@@ -15,6 +15,9 @@ const (
 	CtxKeyRuntime       = "runtime_stats"
 	CtxKeyRequest       = "request_ctx"   // Request-scoped context for timeout/cancellation
 	CtxKeyAuthenticated = "authenticated" // Authentication state for the connection
+	CtxKeyProtover      = "protover"      // RESP protocol version (2 or 3)
+	CtxKeyConnID        = "conn_id"       // Connection ID
+	CtxKeyClientName    = "clientname"    // CLIENT SETNAME value
 )
 
 // ConnWriter wraps a redcon.Conn to implement the Writer interface.
@@ -179,4 +182,49 @@ func IsAuthenticated(w Writer) bool {
 // SetAuthenticated marks the connection as authenticated.
 func SetAuthenticated(w Writer, auth bool) {
 	w.SetContext(CtxKeyAuthenticated, auth)
+}
+
+// GetProtover returns the RESP protocol version (2 or 3).
+func GetProtover(w Writer) int {
+	if v := w.Context(CtxKeyProtover); v != nil {
+		if pv, ok := v.(int); ok {
+			return pv
+		}
+	}
+	return 2 // Default to RESP2
+}
+
+// SetProtover sets the RESP protocol version in the connection context.
+func SetProtover(w Writer, pv int) {
+	w.SetContext(CtxKeyProtover, pv)
+}
+
+// GetConnID returns the connection ID.
+func GetConnID(w Writer) int {
+	if v := w.Context(CtxKeyConnID); v != nil {
+		if id, ok := v.(int); ok {
+			return id
+		}
+	}
+	return 0
+}
+
+// SetConnID sets the connection ID in the connection context.
+func SetConnID(w Writer, id int) {
+	w.SetContext(CtxKeyConnID, id)
+}
+
+// GetClientName returns the client name set via CLIENT SETNAME or HELLO SETNAME.
+func GetClientName(w Writer) string {
+	if v := w.Context(CtxKeyClientName); v != nil {
+		if name, ok := v.(string); ok {
+			return name
+		}
+	}
+	return ""
+}
+
+// SetClientName sets the client name in the connection context.
+func SetClientName(w Writer, name string) {
+	w.SetContext(CtxKeyClientName, name)
 }

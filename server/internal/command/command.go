@@ -42,6 +42,8 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 		return conn.ParseAuth(b)
 	case "echo":
 		return conn.ParseEcho(b)
+	case "hello":
+		return conn.ParseHello(b)
 	case "ping":
 		return conn.ParsePing(b)
 	case "select":
