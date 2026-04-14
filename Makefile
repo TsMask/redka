@@ -27,11 +27,11 @@ vet:
 
 build:
 	@echo "> running build..."
-	@CGO_ENABLED=1 go build -ldflags "-s -w -X config.version=$(build_ver) -X config.commit=$(build_rev) -X config.date=$(build_date)" -trimpath -o build/redka -v main.go
+	@CGO_ENABLED=1 go build -ldflags "-s -w -X github.com/tsmask/redka/config.Version=$(build_ver) -X github.com/tsmask/redka/config.Commit=$(build_rev) -X github.com/tsmask/redka/config.Date=$(build_date)" -trimpath -o redka -v main.go
 	@echo "✓ finished build"
 
 run:
-	@./build/redka
+	@chmod +x ./redka && ./redka
 
 postgres-start:
 	@echo "> starting postgres..."

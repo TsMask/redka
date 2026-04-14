@@ -77,7 +77,7 @@ func sqliteDataSource(path string) string {
 		// (https://sqlite.org/sharedcache.html), which is discouraged,
 		// or use the memdb VFS (https://sqlite.org/src/file?name=src/memdb.c).
 		// https://github.com/ncruces/go-sqlite3/issues/94#issuecomment-2157679766
-		source = "file:/redka.db"
+		source = "file:/tmp/redka.sqlite"
 		params.Set("vfs", "memdb")
 	} else {
 		// This is a file-based database, it must have a "file:" prefix

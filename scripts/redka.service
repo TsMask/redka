@@ -1,0 +1,18 @@
+[Unit]
+Description=Redka Database Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/redka -c /usr/local/etc/redka/redka.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3
+RestartPreventExitStatus=SIGTERM SIGKILL
+
+LimitNOFILE=65535
+LimitNPROC=65535
+
+[Install]
+WantedBy=multi-user.target

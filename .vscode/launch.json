@@ -12,8 +12,7 @@
             "program": "${workspaceFolder}/main.go",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "env": {"GO111MODULE": "on"},
-            "args": ["-s"]
+            "args": ["-h", "0.0.0.0", "-p", "6380"]
         },
         {
             "name": "MySQL",
@@ -23,8 +22,7 @@
             "program": "${workspaceFolder}/main.go",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "env": {"GO111MODULE": "on"},
-            "args": ["-c", "./config.mysql.yaml"]
+            "args": ["-c", "./scripts/redka.mysql.yaml"]
         },
         {
             "name": "PostgreSQL",
@@ -34,8 +32,7 @@
             "program": "${workspaceFolder}/main.go",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "env": {"GO111MODULE": "on"},
-            "args": ["-c", "./config.postgres.yaml"]
+            "args": ["-c", "./scripts/redka.postgres.yaml"]
         },
         {
             "name": "SQLite",
@@ -45,8 +42,7 @@
             "program": "${workspaceFolder}/main.go",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "env": {"GO111MODULE": "on"},
-            "args": ["-c", "./config.sqlite.yaml"]
+            "args": ["-c", "./scripts/redka.sqlite.yaml"]
         }
     ]
 }

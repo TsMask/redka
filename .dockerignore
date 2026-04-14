@@ -2,5 +2,5 @@
 .git
 .gitignore
 .vscode/
-build/
+redka
 Dockerfile

@@ -39,14 +39,14 @@ type ServerConfig struct {
 // DefaultConfig returns a configuration with default values.
 func DefaultConfig() *ServerConfig {
 	return &ServerConfig{
-		Host:      "localhost",
+		Host:      "0.0.0.0",
 		Port:      6379,
 		Sock:      "",
-		DBDSN:     "file:/redka.db?vfs=memdb", // Default to SQLite memory
+		DBDSN:     "file:/tmp/redka.sqlite?vfs=memdb", // Default to SQLite memory
 		Password:  "",
 		Databases: 16, // Redis default
 		Verbose:   false,
-		LogFile:   "",
+		LogFile:   "/tmp/redka.log",
 	}
 }
 

@@ -11,6 +11,9 @@
 # Test binary, built with `go test -c`
 *.test
 *.log
+*.exe
+*.db
+*.sqlite
 
 # Code coverage profiles and other test artifacts
 *.out
@@ -24,10 +27,10 @@ profile.cov
 # Go workspace file
 go.work
 go.work.sum
-build/
-config.mysql.yaml
-config.postgres.yaml
-config.sqlite.yaml
+redka
+scripts/redka.*.yaml
+scripts/redka-*.deb
+scripts/redka-*.rpm
 __debug_*
 
 # env file

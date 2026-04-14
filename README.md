@@ -17,6 +17,7 @@ Redka 是一个用 Go 语言实现的 Redis 兼容服务器，使用关系型数
 - **认证支持**: 支持密码认证，保障服务安全
 - **配置管理**: 支持 YAML 配置文件和命令行参数
 - **日志系统**: 提供结构化日志，支持文件输出和详细日志模式
+- **Unix Socket**: 支持 Unix Domain Socket 连接
 
 ## 支持的数据类型
 
@@ -30,103 +31,47 @@ Redka 支持 Redis 五种核心数据类型：
 
 Redka 还提供键管理、服务器/连接管理命令。
 
-## 快速开始
+## 配置
 
-### 独立服务器模式
+Redka 支持命令行参数和 YAML 配置文件。
 
 ```bash
 # 使用内存数据库启动（默认端口 6379）
 ./redka
 
-# 使用文件数据库启动
-./redka redka.db
-
 # 使用配置文件启动
 ./redka -c config.example.yaml
 
-# 监听所有网络接口
-./redka -h 0.0.0.0 -p 6380 redka.db
+# 使用文件数据库启动
+./redka -p 6380 redka.db
+
+# 使用 Unix Socket
+./redka -s /tmp/redka.sock redka.db
 ```
-
-### Go 模块嵌入
-
-```go
-import "github.com/tsmask/redka"
-
-// 打开数据库
-db, err := redka.Open("redka.db", nil)
-if err != nil {
-    log.Fatal(err)
-}
-defer db.Close()
-
-// 使用字符串操作
-db.Str().Set("name", []byte("alice"))
-val, _ := db.Str().Get("name")
-```
-
-## 配置
-
-Redka 支持命令行参数和 YAML 配置文件。
 
 ### 命令行参数
 
 ```bash
-./redka -h 0.0.0.0 -p 6380 -c config.yaml 
-
+./redka [-h host] [-p port] [-s unix-socket] [-a password] [-c config-file] [-v] [db-dsn]
 ```
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-h` | 监听地址 | `localhost` |
+| `-h` | 监听地址 | `0.0.0.0` |
 | `-p` | 监听端口 | `6379` |
-| `-v` | 启用详细日志 | `false` |
-| `-c` | 配置文件路径（会覆盖命令行参数） | 无 |
-| 后端地址 | 数据源链接 | `file:/redka.db?vfs=memdb` |
-
-### 配置文件示例
-
-```yaml
-host: localhost
-port: 6380
-db_dsn: "file:/redka.db?vfs=memdb"
-password: ""
-verbose: false
-log_file: ""
-```
+| `-s` | Unix socket 路径（覆盖 host 和 port） | 无 |
+| `-a` | 认证密码 | 无 |
+| `-c` | 配置文件路径（会被命令行参数覆盖） | 无 [配置文件示例](./scripts/redka.yaml) |
+| `-v` | 启用详细日志和性能分析端点 | `false` |
+| `db-dsn` | 数据库连接字符串 | `file:/tmp/redka.sqlite?vfs=memdb` |
 
 ### DSN 格式说明
 
 | 数据库类型 | DSN 示例 |
 |------------|----------|
-| SQLite | `file:redka.db` 或 `sqlite:/path/to/db` |
+| SQLite | `file:redka.db` 或 `sqlite:/path/to/db` 或直接文件路径 |
 | PostgreSQL | `postgres://user:password@localhost:5432/dbname` |
 | MySQL | `mysql://user:password@tcp(localhost:3306)/dbname` |
-
-## 支持的命令
-
-Redka 实现了以下 Redis 命令分类：
-
-### 连接与服务器
-`PING`, `ECHO`, `SELECT`, `AUTH`, `COMMAND`, `CONFIG`, `DBSIZE`, `FLUSHDB`, `FLUSHALL`, `INFO`, `LOLWUT`
-
-### 键操作
-`DEL`, `EXISTS`, `EXPIRE`, `EXPIREAT`, `PEXPIRE`, `PEXPIREAT`, `KEYS`, `PERSIST`, `RANDOMKEY`, `RENAME`, `RENAMENX`, `SCAN`, `TTL`, `TYPE`
-
-### 字符串
-`GET`, `SET`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `MGET`, `MSET`, `INCR`, `INCRBY`, `DECR`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN`, `GETRANGE`, `SETRANGE`, `SUBSTR`
-
-### 列表
-`LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX`, `LSET`, `LINSERT`, `LREM`, `LTRIM`, `RPOPLPUSH`
-
-### 集合
-`SADD`, `SREM`, `SCARD`, `SISMEMBER`, `SMEMBERS`, `SMISMEMBER`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SDIFF`, `SINTERSTORE`, `SUNIONSTORE`, `SDIFFSTORE`, `SINTERCARD`, `SMOVE`, `SSCAN`
-
-### 有序集合
-`ZADD`, `ZREM`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZCOUNT`, `ZINCRBY`, `ZUNION`, `ZINTER`, `ZUNIONSTORE`, `ZINTERSTORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZSCAN`
-
-### 哈希
-`HSET`, `HGET`, `HGETALL`, `HMGET`, `HMSET`, `HDEL`, `HLEN`, `HEXISTS`, `HSETNX`, `HINCRBY`, `HINCRBYFLOAT`, `HKEYS`, `HVALS`, `HSTRLEN`, `HRANDFIELD`, `HSCAN`
 
 ## 数据库后端
 
@@ -135,8 +80,6 @@ Redka 使用 GORM 作为 ORM，支持三种关系型数据库后端：
 - **SQLite**: 轻量级，进程内存储，适合开发和测试
 - **PostgreSQL**: 功能强大的开源数据库，适合生产环境
 - **MySQL**: 广泛使用的关系型数据库，支持 MariaDB
-
-数据存储在关系型数据库中，使用简单模式并提供视图以便检查数据。
 
 ## 性能
 
@@ -152,34 +95,53 @@ Redka 不追求极致性能。使用 SQLite 这种通用关系型后端无法击
 
 ## 项目结构
 
-```
+```text
 redka/
 ├── main.go                # 服务入口
 ├── server/                # 服务器实现
 ├── internal/              # 内部核心模块
-├── config/                # 配置加载
-├── docs/                  # 文档
-├── test-redis-cli.sh      # 功能测试脚本
-└── README.md             # 本文件
+│   ├── core/              # 核心类型定义
+│   ├── store/             # 数据库存储层
+│   ├── rstring/          # 字符串操作
+│   ├── rlist/             # 列表操作
+│   ├── rset/              # 集合操作
+│   ├── rzset/             # 有序集合操作
+│   └── rhash/             # 哈希操作
+├── config/                # 配置管理
+├── scripts/               # 脚本和配置示例
+└── README.md              # 本文件
 ```
 
 ## 测试
 
 ```bash
 # 运行功能测试脚本（需先启动服务）
-./test-redis-cli.sh [port] [host]
+./test-redis-cli.sh [port] [host] [password]
 
 # 示例
-./test-redis-cli.sh 6380 127.0.0.1
+./test-redis-cli.sh 6380 127.0.0.1 password
 ```
 
 测试脚本会自动检测 command.go 中支持的全部命令，确保测试覆盖完整。
 
+## 打包
+
+```bash
+# 打包 Deb 包
+./scripts/build-deb.sh
+
+# 打包 RPM 包
+./scripts/build-rpm.sh
+
+# 普通二进制
+make build
+```
+
 ## 贡献
 
-欢迎贡献代码。除 bug 修复外，请先开 issue 讨论你想做的更改。
+欢迎贡献代码，请先开 issue 讨论你想做的更改。
 
-请根据需要添加或更新测试。
+欢迎使用AI工具诊断该项目，并添加或更新功能测试。
 
 ## 致谢
 
@@ -189,5 +151,6 @@ Redka 的实现离不开这些优秀项目及其创建者：
 - [SQLite](https://sqlite.org/) ([D. Richard Hipp](https://www.sqlite.org/crew.html)) - 驱动世界的进程内数据库
 - [Redcon](https://github.com/tidwall/redcon) ([Josh Baker](https://github.com/tidwall)) - 简洁易用的 RESP 服务器实现
 - [GORM](https://gorm.io/) - Go 语言的 ORM 库
+- [Fork nalgeon/redka](https://github.com/nalgeon/redka) - Redka用SQL重新实现，与Redis API保持兼容
 
 Logo 字体由 [Ek Type](https://ektype.in/) 提供。
