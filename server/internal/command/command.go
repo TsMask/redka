@@ -9,6 +9,7 @@ import (
 	"github.com/tsmask/redka/server/internal/command/hash"
 	"github.com/tsmask/redka/server/internal/command/key"
 	"github.com/tsmask/redka/server/internal/command/list"
+	"github.com/tsmask/redka/server/internal/command/memory"
 	"github.com/tsmask/redka/server/internal/command/server"
 	"github.com/tsmask/redka/server/internal/command/set"
 	str "github.com/tsmask/redka/server/internal/command/string"
@@ -36,6 +37,10 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 		return server.ParseInfo(b)
 	case "lolwut":
 		return server.ParseLolwut(b)
+
+	// memory
+	case "memory":
+		return memory.ParseMemory(b)
 
 	// connection
 	case "auth":
@@ -68,6 +73,8 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 		return key.ParseExpire(b, 1)
 	case "pexpireat":
 		return key.ParseExpireAt(b, 1)
+	case "pttl":
+		return key.ParsePTTL(b)
 	case "randomkey":
 		return key.ParseRandomKey(b)
 	case "rename":
