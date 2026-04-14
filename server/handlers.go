@@ -14,13 +14,13 @@ import (
 )
 
 // createHandlers returns the server command handlers.
-func createHandlers(db *store.Store) redcon.HandlerFunc {
+func createHandlers(db *store.Store, clientRegistry *redis.ClientRegistry) redcon.HandlerFunc {
 	return timeout(
 		logging(
 			auth(
 				parse(
 					multi(
-						handle(db),
+						handle(db, clientRegistry),
 					),
 				),
 			),
@@ -198,12 +198,17 @@ func multi(next redcon.HandlerFunc) redcon.HandlerFunc {
 }
 
 // handle processes the command in either multi or single mode.
-func handle(db *store.Store) redcon.HandlerFunc {
+func handle(db *store.Store, clientRegistry *redis.ClientRegistry) redcon.HandlerFunc {
 	return func(conn redcon.Conn, cmd redcon.Command) {
 		state := getState(conn)
 		cw := redis.NewConnWriter(conn)
 
 		reqCtx := redis.GetRequestCtx(cw)
+
+		// Update client registry with last command
+		if clientID := cw.ConnID(); clientID != 0 {
+			clientRegistry.SetLastCmd(clientID, string(cmd.Args[0]))
+		}
 
 		if state.inMulti {
 			handleMulti(reqCtx, cw, state, db)

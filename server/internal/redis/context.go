@@ -10,14 +10,27 @@ import (
 
 // Context keys for per-connection state.
 const (
-	CtxKeyConfig        = "config"
-	CtxKeySelectedDB    = "selected_db"
-	CtxKeyRuntime       = "runtime_stats"
-	CtxKeyRequest       = "request_ctx"   // Request-scoped context for timeout/cancellation
-	CtxKeyAuthenticated = "authenticated" // Authentication state for the connection
-	CtxKeyProtover      = "protover"      // RESP protocol version (2 or 3)
-	CtxKeyConnID        = "conn_id"       // Connection ID
-	CtxKeyClientName    = "clientname"    // CLIENT SETNAME value
+	CtxKeyConfig              = "config"
+	CtxKeySelectedDB          = "selected_db"
+	CtxKeyRuntime             = "runtime_stats"
+	CtxKeyRequest             = "request_ctx"           // Request-scoped context for timeout/cancellation
+	CtxKeyAuthenticated       = "authenticated"         // Authentication state for the connection
+	CtxKeyProtover            = "protover"              // RESP protocol version (2 or 3)
+	CtxKeyConnID              = "conn_id"               // Connection ID
+	CtxKeyClientName          = "clientname"            // CLIENT SETNAME value
+	CtxKeyClientRegistry      = "client_registry"       // Client connection registry
+	CtxKeyClientPaused        = "client_paused"         // CLIENT PAUSE state
+	CtxKeyClientPauseMode     = "client_pause_mode"     // CLIENT PAUSE mode (ALL/WRITE)
+	CtxKeyClientReplyMode     = "client_reply_mode"     // CLIENT REPLY mode (ON/OFF/SKIP)
+	CtxKeyClientSkipReply     = "client_skip_reply"     // Skip next reply flag
+	CtxKeyClientTracking      = "client_tracking"       // CLIENT TRACKING state
+	CtxKeyClientTrackingRedir = "client_tracking_redir" // CLIENT TRACKING redirect target
+	CtxKeyClientCaching       = "client_caching"        // CLIENT CACHING hint
+	CtxKeyClientNoEvict       = "client_no_evict"       // CLIENT NO-EVICT mode
+	CtxKeyClientNoTouch       = "client_no_touch"       // CLIENT NO-TOUCH mode
+	CtxKeyClientLibName       = "client_lib_name"       // Client library name
+	CtxKeyClientLibVer        = "client_lib_ver"        // Client library version
+	CtxKeyClientInfo          = "client_info"           // Custom client info map
 )
 
 // ConnWriter wraps a redcon.Conn to implement the Writer interface.
@@ -54,6 +67,23 @@ func (w *ConnWriter) SetContext(key string, v any) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.ctx[key] = v
+}
+
+// ConnID returns the client connection ID.
+func (w *ConnWriter) ConnID() int64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if v, ok := w.ctx[CtxKeyConnID]; ok {
+		if id, ok := v.(int64); ok {
+			return id
+		}
+	}
+	return 0
+}
+
+// Conn returns the underlying redcon.Conn.
+func (w *ConnWriter) Conn() redcon.Conn {
+	return w.conn
 }
 
 // WriteAny writes any value to the client.
@@ -200,9 +230,9 @@ func SetProtover(w Writer, pv int) {
 }
 
 // GetConnID returns the connection ID.
-func GetConnID(w Writer) int {
+func GetConnID(w Writer) int64 {
 	if v := w.Context(CtxKeyConnID); v != nil {
-		if id, ok := v.(int); ok {
+		if id, ok := v.(int64); ok {
 			return id
 		}
 	}
@@ -210,7 +240,7 @@ func GetConnID(w Writer) int {
 }
 
 // SetConnID sets the connection ID in the connection context.
-func SetConnID(w Writer, id int) {
+func SetConnID(w Writer, id int64) {
 	w.SetContext(CtxKeyConnID, id)
 }
 
@@ -227,4 +257,196 @@ func GetClientName(w Writer) string {
 // SetClientName sets the client name in the connection context.
 func SetClientName(w Writer, name string) {
 	w.SetContext(CtxKeyClientName, name)
+}
+
+// GetClientRegistryFromWriter returns the client registry from the Writer context.
+func GetClientRegistryFromWriter(w Writer) *ClientRegistry {
+	if v := w.Context(CtxKeyClientRegistry); v != nil {
+		if reg, ok := v.(*ClientRegistry); ok {
+			return reg
+		}
+	}
+	return nil
+}
+
+// --- CLIENT command helpers ---
+
+// IsClientPaused returns whether client is paused.
+func IsClientPaused(w Writer) bool {
+	if v := w.Context(CtxKeyClientPaused); v != nil {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+// SetClientPaused sets the client pause state.
+func SetClientPaused(w Writer, paused bool) {
+	w.SetContext(CtxKeyClientPaused, paused)
+}
+
+// GetClientPauseMode returns the client pause mode (ALL/WRITE).
+func GetClientPauseMode(w Writer) string {
+	if v := w.Context(CtxKeyClientPauseMode); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return "ALL"
+}
+
+// SetClientPauseMode sets the client pause mode.
+func SetClientPauseMode(w Writer, mode string) {
+	w.SetContext(CtxKeyClientPauseMode, mode)
+}
+
+// GetClientReplyMode returns the client reply mode (ON/OFF/SKIP).
+func GetClientReplyMode(w Writer) string {
+	if v := w.Context(CtxKeyClientReplyMode); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return "ON"
+}
+
+// SetClientReplyMode sets the client reply mode.
+func SetClientReplyMode(w Writer, mode string) {
+	w.SetContext(CtxKeyClientReplyMode, mode)
+}
+
+// SkipNextReply sets flag to skip the next reply.
+func SkipNextReply(w Writer) {
+	w.SetContext(CtxKeyClientSkipReply, true)
+}
+
+// ShouldSkipReply checks if next reply should be skipped and clears the flag.
+func ShouldSkipReply(w Writer) bool {
+	if v := w.Context(CtxKeyClientSkipReply); v != nil {
+		if b, ok := v.(bool); ok && b {
+			w.SetContext(CtxKeyClientSkipReply, false)
+			return true
+		}
+	}
+	return false
+}
+
+// IsClientTracking returns whether client tracking is enabled.
+func IsClientTracking(w Writer) bool {
+	if v := w.Context(CtxKeyClientTracking); v != nil {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+// SetClientTracking enables/disables client tracking.
+func SetClientTracking(w Writer, enabled bool) {
+	w.SetContext(CtxKeyClientTracking, enabled)
+}
+
+// GetClientTrackingRedir returns the tracking redirect target client ID.
+func GetClientTrackingRedir(w Writer) int64 {
+	if v := w.Context(CtxKeyClientTrackingRedir); v != nil {
+		if id, ok := v.(int64); ok {
+			return id
+		}
+	}
+	return 0
+}
+
+// SetClientTrackingRedir sets the tracking redirect target client ID.
+func SetClientTrackingRedir(w Writer, id int64) {
+	w.SetContext(CtxKeyClientTrackingRedir, id)
+}
+
+// IsClientCaching returns the CLIENT CACHING hint.
+func IsClientCaching(w Writer) bool {
+	if v := w.Context(CtxKeyClientCaching); v != nil {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return true // Default to yes
+}
+
+// SetClientCaching sets the CLIENT CACHING hint.
+func SetClientCaching(w Writer, yes bool) {
+	w.SetContext(CtxKeyClientCaching, yes)
+}
+
+// IsClientNoEvict returns whether no-evict mode is enabled.
+func IsClientNoEvict(w Writer) bool {
+	if v := w.Context(CtxKeyClientNoEvict); v != nil {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+// SetClientNoEvict enables/disables no-evict mode.
+func SetClientNoEvict(w Writer, enabled bool) {
+	w.SetContext(CtxKeyClientNoEvict, enabled)
+}
+
+// IsClientNoTouch returns whether no-touch mode is enabled.
+func IsClientNoTouch(w Writer) bool {
+	if v := w.Context(CtxKeyClientNoTouch); v != nil {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+// SetClientNoTouch enables/disables no-touch mode.
+func SetClientNoTouch(w Writer, enabled bool) {
+	w.SetContext(CtxKeyClientNoTouch, enabled)
+}
+
+// GetClientLibName returns the client library name.
+func GetClientLibName(w Writer) string {
+	if v := w.Context(CtxKeyClientLibName); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// SetClientLibName sets the client library name.
+func SetClientLibName(w Writer, name string) {
+	w.SetContext(CtxKeyClientLibName, name)
+}
+
+// GetClientLibVer returns the client library version.
+func GetClientLibVer(w Writer) string {
+	if v := w.Context(CtxKeyClientLibVer); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// SetClientLibVer sets the client library version.
+func SetClientLibVer(w Writer, ver string) {
+	w.SetContext(CtxKeyClientLibVer, ver)
+}
+
+// SetClientInfo sets a custom client info key-value pair.
+func SetClientInfo(w Writer, key, value string) {
+	m := make(map[string]string)
+	if v := w.Context(CtxKeyClientInfo); v != nil {
+		if existing, ok := v.(map[string]string); ok {
+			for k, val := range existing {
+				m[k] = val
+			}
+		}
+	}
+	m[key] = value
+	w.SetContext(CtxKeyClientInfo, m)
 }

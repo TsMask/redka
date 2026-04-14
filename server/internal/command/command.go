@@ -40,6 +40,8 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 	// connection
 	case "auth":
 		return conn.ParseAuth(b)
+	case "client":
+		return conn.ParseClient(b)
 	case "echo":
 		return conn.ParseEcho(b)
 	case "hello":

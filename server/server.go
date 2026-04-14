@@ -34,8 +34,10 @@ func New(net string, addr string, db *store.Store) *Server {
 
 // NewWithConfig creates a new Redka server with custom configuration.
 func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerConfig) *Server {
-	handler := createHandlers(db)
 	runtimeStats := redis.NewRuntimeStats(time.Now(), redis.NewRuntimeRunID())
+	clientRegistry := redis.InitClientRegistry()
+
+	handler := createHandlers(db, clientRegistry)
 
 	// Use provided config or default
 	if cfg == nil {
@@ -47,12 +49,26 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 		ctx := make(map[string]any)
 		ctx[redis.CtxKeyConfig] = cfg
 		ctx[redis.CtxKeyRuntime] = runtimeStats
+		ctx[redis.CtxKeyClientRegistry] = clientRegistry
 		conn.SetContext(ctx)
+
+		// Register the client
+		clientID := clientRegistry.Add(conn, 0)
+		ctx[redis.CtxKeyConnID] = clientID
+
 		runtimeStats.OnAccept()
-		slog.Info("accept connection", "client", conn.RemoteAddr(), "db", 0)
+		slog.Info("accept connection", "client", conn.RemoteAddr(), "db", 0, "id", clientID)
 		return true
 	}
 	closed := func(conn redcon.Conn, err error) {
+		// Get client ID from context to unregister
+		if ctx := conn.Context(); ctx != nil {
+			if m, ok := ctx.(map[string]any); ok {
+				if id, ok := m[redis.CtxKeyConnID].(int64); ok {
+					clientRegistry.Remove(id)
+				}
+			}
+		}
 		runtimeStats.OnClose()
 		if err != nil {
 			slog.Debug("close connection", "client", conn.RemoteAddr(), "error", err)
