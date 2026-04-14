@@ -60,7 +60,7 @@ func (c Info) buildInfo(sections []string, w redis.Writer, red redis.Redka) stri
 		case "memory":
 			parts = append(parts, c.infoMemory())
 		case "persistence":
-			parts = append(parts, c.infoPersistence())
+			parts = append(parts, c.infoPersistence(snap))
 		case "stats":
 			parts = append(parts, c.infoStats(snap))
 		case "replication":
@@ -81,124 +81,290 @@ func (c Info) buildInfo(sections []string, w redis.Writer, red redis.Redka) stri
 	if len(parts) == 0 {
 		return ""
 	}
-	return strings.Join(parts, "\r\n") + "\r\n"
+	return strings.Join(parts, "\r\n\r\n") + "\r\n"
 }
 
 func (c Info) infoServer(w redis.Writer, snap redis.RuntimeSnapshot) string {
 	cfg := redis.GetConfig(w)
 	port := 6379
+	host := "0.0.0.0"
+	if cfg != nil {
+		if cfg.Port != 0 {
+			port = cfg.Port
+		}
+		if cfg.Host != "" {
+			host = cfg.Host
+		}
+	}
 	mode := "standalone"
-	runID := strconv.FormatInt(time.Now().UnixNano(), 16)
-	up := int(time.Since(infoStartTime).Seconds())
-	if cfg != nil && cfg.Port != 0 {
-		port = cfg.Port
+	runID := snap.RunID
+	if runID == "" {
+		runID = strconv.FormatInt(time.Now().UnixNano(), 16)
 	}
-	if snap.RunID != "" {
-		runID = snap.RunID
+	up := int(snap.UptimeInSeconds)
+	if up == 0 {
+		up = int(time.Since(infoStartTime).Seconds())
 	}
-	if snap.UptimeInSeconds > 0 {
-		up = int(snap.UptimeInSeconds)
-	}
-	return strings.Join([]string{
-		"# Server",
-		"redis_version:" + config.Version,
-		"redis_mode:" + mode,
-		"os:" + runtime.GOOS,
-		"arch_bits:" + strconv.Itoa(strconv.IntSize),
-		"process_id:" + strconv.Itoa(os.Getpid()),
-		"run_id:" + runID,
-		"tcp_port:" + strconv.Itoa(port),
-		"uptime_in_seconds:" + strconv.Itoa(up),
-		"uptime_in_days:" + strconv.Itoa(up/86400),
-	}, "\r\n")
+	upDays := up / 86400
+
+	executable, _ := os.Executable()
+	ioThreadsActive := "0"
+
+	var lines []string
+	lines = append(lines, "# Server")
+	lines = append(lines, "redis_version:"+config.Version)
+	lines = append(lines, "redis_mode:"+mode)
+	lines = append(lines, "os:"+runtime.GOOS+" "+runtime.GOARCH)
+	lines = append(lines, "arch_bits:"+strconv.Itoa(strconv.IntSize))
+	lines = append(lines, "monotonic_clock:POSIX clock_gettime")
+	lines = append(lines, "multiplexing_api:epoll")
+	lines = append(lines, "atomicvar_api:atomic")
+	lines = append(lines, "gcc_version:"+runtime.Version())
+	lines = append(lines, "process_id:"+strconv.Itoa(os.Getpid()))
+	lines = append(lines, "process_supervised:no")
+	lines = append(lines, "run_id:"+runID)
+	lines = append(lines, "tcp_port:"+strconv.Itoa(port))
+	lines = append(lines, "server_time_usec:"+strconv.FormatInt(snap.ServerTimeUsec, 10))
+	lines = append(lines, "uptime_in_seconds:"+strconv.Itoa(up))
+	lines = append(lines, "uptime_in_days:"+strconv.Itoa(upDays))
+	lines = append(lines, "hz:10")
+	lines = append(lines, "configured_hz:10")
+	lines = append(lines, "lru_clock:"+strconv.FormatInt(snap.LruClock, 10))
+	lines = append(lines, "executable:"+executable)
+	lines = append(lines, "config_file:")
+	lines = append(lines, "io_threads_active:"+ioThreadsActive)
+	lines = append(lines, "listener0:name=tcp,bind="+host+",port="+strconv.Itoa(port)+",proto=tcp")
+
+	return strings.Join(lines, "\r\n")
 }
 
 func (c Info) infoClients(snap redis.RuntimeSnapshot) string {
-	return strings.Join([]string{
-		"# Clients",
-		"connected_clients:" + strconv.FormatInt(snap.ConnectedClients, 10),
-		"blocked_clients:0",
-	}, "\r\n")
+	var lines []string
+	lines = append(lines, "# Clients")
+	lines = append(lines, "connected_clients:"+strconv.FormatInt(snap.ConnectedClients, 10))
+	lines = append(lines, "cluster_connections:0")
+	lines = append(lines, "maxclients:10000")
+	lines = append(lines, "client_recent_max_input_buffer:0")
+	lines = append(lines, "client_recent_max_output_buffer:0")
+	lines = append(lines, "blocked_clients:0")
+	lines = append(lines, "tracking_clients:0")
+	lines = append(lines, "clients_in_timeout_table:0")
+	lines = append(lines, "total_blocking_keys:0")
+	lines = append(lines, "total_blocking_keys_on_nokey:0")
+	return strings.Join(lines, "\r\n")
 }
 
 func (c Info) infoMemory() string {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	return strings.Join([]string{
-		"# Memory",
-		"used_memory:" + strconv.FormatUint(ms.Alloc, 10),
-		"used_memory_peak:" + strconv.FormatUint(ms.TotalAlloc, 10),
-		"used_memory_rss:0",
-		"maxmemory:0",
-	}, "\r\n")
+
+	var lines []string
+	lines = append(lines, "# Memory")
+	lines = append(lines, "used_memory:"+strconv.FormatUint(ms.Alloc, 10))
+	lines = append(lines, "used_memory_human:"+formatBytes(int64(ms.Alloc)))
+	lines = append(lines, "used_memory_rss:"+strconv.FormatUint(ms.Sys, 10))
+	lines = append(lines, "used_memory_rss_human:"+formatBytes(int64(ms.Sys)))
+	lines = append(lines, "used_memory_peak:"+strconv.FormatUint(ms.Alloc, 10))
+	lines = append(lines, "used_memory_peak_human:"+formatBytes(int64(ms.Alloc)))
+	lines = append(lines, "used_memory_peak_perc:"+percentage(ms.Alloc, ms.Sys))
+	lines = append(lines, "used_memory_overhead:"+strconv.FormatUint(ms.Sys-ms.Alloc, 10))
+	lines = append(lines, "used_memory_startup:"+strconv.FormatUint(ms.Sys, 10))
+	lines = append(lines, "used_memory_dataset:"+strconv.FormatUint(ms.Alloc, 10))
+	lines = append(lines, "used_memory_dataset_perc:"+percentage(ms.Alloc, ms.Sys))
+	lines = append(lines, "allocator_allocated:"+strconv.FormatUint(ms.Alloc, 10))
+	lines = append(lines, "allocator_active:"+strconv.FormatUint(ms.Alloc, 10))
+	lines = append(lines, "allocator_resident:"+strconv.FormatUint(ms.Sys, 10))
+	lines = append(lines, "total_system_memory:"+strconv.FormatUint(ms.Sys, 10))
+	lines = append(lines, "total_system_memory_human:"+formatBytes(int64(ms.Sys)))
+	lines = append(lines, "used_memory_lua:0")
+	lines = append(lines, "used_memory_lua_human:0B")
+	lines = append(lines, "used_memory_scripts:0")
+	lines = append(lines, "used_memory_scripts_human:0B")
+	lines = append(lines, "number_of_cached_scripts:0")
+	lines = append(lines, "maxmemory:0")
+	lines = append(lines, "maxmemory_human:0B")
+	lines = append(lines, "maxmemory_policy:noeviction")
+	lines = append(lines, "allocator_frag_ratio:"+ratio(ms.Alloc, ms.Sys))
+	lines = append(lines, "allocator_frag_bytes:"+strconv.FormatInt(int64(ms.Sys-ms.Alloc), 10))
+	lines = append(lines, "allocator_rss_ratio:"+ratio(ms.Sys, ms.Alloc))
+	lines = append(lines, "allocator_rss_bytes:"+strconv.FormatUint(ms.Sys, 10))
+	lines = append(lines, "rss_overhead_ratio:1.00")
+	lines = append(lines, "rss_overhead_bytes:0")
+	lines = append(lines, "mem_fragmentation_ratio:"+ratio(ms.Alloc, ms.Sys))
+	lines = append(lines, "mem_fragmentation_bytes:"+strconv.FormatInt(int64(ms.Sys-ms.Alloc), 10))
+	lines = append(lines, "mem_not_counted_for_evict:0")
+	lines = append(lines, "mem_replication_backlog:0")
+	lines = append(lines, "mem_total_replication_buffers:0")
+	lines = append(lines, "mem_clients_slaves:0")
+	lines = append(lines, "mem_clients_normal:0")
+	lines = append(lines, "mem_cluster_links:0")
+	lines = append(lines, "mem_aof_buffer:0")
+	lines = append(lines, "mem_allocator:Go runtime allocator")
+	lines = append(lines, "active_defrag_running:0")
+	lines = append(lines, "lazyfree_pending_objects:0")
+	lines = append(lines, "lazyfreed_objects:0")
+	return strings.Join(lines, "\r\n")
 }
 
-func (c Info) infoPersistence() string {
-	return strings.Join([]string{
-		"# Persistence",
-		"loading:0",
-		"rdb_changes_since_last_save:0",
-		"rdb_bgsave_in_progress:0",
-		"aof_enabled:0",
-	}, "\r\n")
+func (c Info) infoPersistence(snap redis.RuntimeSnapshot) string {
+	var lines []string
+	lines = append(lines, "# Persistence")
+	lines = append(lines, "loading:0")
+	lines = append(lines, "async_loading:0")
+	lines = append(lines, "current_cow_size:0")
+	lines = append(lines, "current_cow_size_age:0")
+	lines = append(lines, "current_fork_perc:0.00")
+	lines = append(lines, "current_save_keys_processed:0")
+	lines = append(lines, "current_save_keys_total:0")
+	lines = append(lines, "rdb_changes_since_last_save:0")
+	lines = append(lines, "rdb_bgsave_in_progress:0")
+	lines = append(lines, "rdb_last_save_time:"+strconv.FormatInt(time.Now().Unix(), 10))
+	lines = append(lines, "rdb_last_bgsave_status:ok")
+	lines = append(lines, "rdb_last_bgsave_time_sec:0")
+	lines = append(lines, "rdb_current_bgsave_time_sec:-1")
+	lines = append(lines, "rdb_saves:0")
+	lines = append(lines, "rdb_last_cow_size:0")
+	lines = append(lines, "rdb_last_load_keys_expired:0")
+	lines = append(lines, "rdb_last_load_keys_loaded:0")
+	lines = append(lines, "aof_enabled:0")
+	lines = append(lines, "aof_rewrite_in_progress:0")
+	lines = append(lines, "aof_rewrite_scheduled:0")
+	lines = append(lines, "aof_last_rewrite_time_sec:-1")
+	lines = append(lines, "aof_current_rewrite_time_sec:-1")
+	lines = append(lines, "aof_last_bgrewrite_status:ok")
+	lines = append(lines, "aof_rewrites:0")
+	lines = append(lines, "aof_rewrites_consecutive_failures:0")
+	lines = append(lines, "aof_last_write_status:ok")
+	lines = append(lines, "aof_last_cow_size:0")
+	lines = append(lines, "module_fork_in_progress:0")
+	lines = append(lines, "module_fork_last_cow_size:0")
+	return strings.Join(lines, "\r\n")
 }
 
 func (c Info) infoStats(snap redis.RuntimeSnapshot) string {
-	return strings.Join([]string{
-		"# Stats",
-		"total_connections_received:" + strconv.FormatInt(snap.TotalConnectionsReceived, 10),
-		"total_commands_processed:" + strconv.FormatInt(snap.TotalCommandsProcessed, 10),
-		"instantaneous_ops_per_sec:" + strconv.FormatInt(snap.InstantaneousOpsPerSec, 10),
-		"keyspace_hits:0",
-		"keyspace_misses:0",
-	}, "\r\n")
+	var lines []string
+	lines = append(lines, "# Stats")
+	lines = append(lines, "total_connections_received:"+strconv.FormatInt(snap.TotalConnectionsReceived, 10))
+	lines = append(lines, "total_commands_processed:"+strconv.FormatInt(snap.TotalCommandsProcessed, 10))
+	lines = append(lines, "instantaneous_ops_per_sec:"+strconv.FormatInt(snap.InstantaneousOpsPerSec, 10))
+	lines = append(lines, "total_net_input_bytes:"+strconv.FormatInt(snap.TotalNetInputBytes, 10))
+	lines = append(lines, "total_net_output_bytes:"+strconv.FormatInt(snap.TotalNetOutputBytes, 10))
+	lines = append(lines, "total_net_repl_input_bytes:0")
+	lines = append(lines, "total_net_repl_output_bytes:0")
+	lines = append(lines, "instantaneous_input_kbps:0.00")
+	lines = append(lines, "instantaneous_output_kbps:0.00")
+	lines = append(lines, "instantaneous_input_repl_kbps:0.00")
+	lines = append(lines, "instantaneous_output_repl_kbps:0.00")
+	lines = append(lines, "rejected_connections:"+strconv.FormatInt(snap.RejectedConnections, 10))
+	lines = append(lines, "sync_full:0")
+	lines = append(lines, "sync_partial_ok:0")
+	lines = append(lines, "sync_partial_err:0")
+	lines = append(lines, "expired_keys:"+strconv.FormatInt(snap.ExpiredKeys, 10))
+	lines = append(lines, "expired_stale_perc:0.00")
+	lines = append(lines, "expired_time_cap_reached_count:0")
+	lines = append(lines, "expire_cycle_cpu_milliseconds:0")
+	lines = append(lines, "evicted_keys:"+strconv.FormatInt(snap.EvictedKeys, 10))
+	lines = append(lines, "evicted_clients:0")
+	lines = append(lines, "total_eviction_exceeded_time:0")
+	lines = append(lines, "current_eviction_exceeded_time:0")
+	lines = append(lines, "keyspace_hits:"+strconv.FormatInt(snap.KeyspaceHits, 10))
+	lines = append(lines, "keyspace_misses:"+strconv.FormatInt(snap.KeyspaceMisses, 10))
+	lines = append(lines, "pubsub_channels:0")
+	lines = append(lines, "pubsub_patterns:0")
+	lines = append(lines, "pubsubshard_channels:0")
+	lines = append(lines, "latest_fork_usec:0")
+	lines = append(lines, "total_forks:0")
+	lines = append(lines, "migrate_cached_sockets:0")
+	lines = append(lines, "slave_expires_tracked_keys:0")
+	lines = append(lines, "active_defrag_hits:0")
+	lines = append(lines, "active_defrag_misses:0")
+	lines = append(lines, "active_defrag_key_hits:0")
+	lines = append(lines, "active_defrag_key_misses:0")
+	lines = append(lines, "total_active_defrag_time:0")
+	lines = append(lines, "current_active_defrag_time:0")
+	lines = append(lines, "tracking_total_keys:0")
+	lines = append(lines, "tracking_total_items:0")
+	lines = append(lines, "tracking_total_prefixes:0")
+	lines = append(lines, "unexpected_error_replies:0")
+	lines = append(lines, "total_error_replies:0")
+	lines = append(lines, "dump_payload_sanitizations:0")
+	lines = append(lines, "total_reads_processed:"+strconv.FormatInt(snap.TotalCommandsProcessed, 10))
+	lines = append(lines, "total_writes_processed:"+strconv.FormatInt(snap.TotalCommandsProcessed, 10))
+	lines = append(lines, "io_threaded_reads_processed:0")
+	lines = append(lines, "io_threaded_writes_processed:0")
+	lines = append(lines, "reply_buffer_shrinks:0")
+	lines = append(lines, "reply_buffer_expands:0")
+	lines = append(lines, "eventloop_cycles:0")
+	lines = append(lines, "eventloop_duration_sum:0")
+	lines = append(lines, "eventloop_duration_cmd_sum:0")
+	lines = append(lines, "instantaneous_eventloop_cycles_per_sec:0")
+	lines = append(lines, "instantaneous_eventloop_duration_usec:0")
+	lines = append(lines, "acl_access_denied_auth:0")
+	lines = append(lines, "acl_access_denied_cmd:0")
+	lines = append(lines, "acl_access_denied_key:0")
+	lines = append(lines, "acl_access_denied_channel:0")
+	return strings.Join(lines, "\r\n")
 }
 
 func (c Info) infoReplication() string {
-	return strings.Join([]string{
-		"# Replication",
-		"role:master",
-		"connected_slaves:0",
-	}, "\r\n")
+	var lines []string
+	lines = append(lines, "# Replication")
+	lines = append(lines, "role:master")
+	lines = append(lines, "master_failover_state:no-failover")
+	lines = append(lines, "master_replid:0000000000000000000000000000000000000000")
+	lines = append(lines, "master_replid2:0000000000000000000000000000000000000000")
+	lines = append(lines, "master_repl_offset:0")
+	lines = append(lines, "second_repl_offset:-1")
+	lines = append(lines, "repl_backlog_active:0")
+	lines = append(lines, "repl_backlog_size:1048576")
+	lines = append(lines, "repl_backlog_first_byte_offset:0")
+	lines = append(lines, "repl_backlog_histlen:0")
+	lines = append(lines, "connected_slaves:0")
+	return strings.Join(lines, "\r\n")
 }
 
 func (c Info) infoCPU() string {
-	return strings.Join([]string{
-		"# CPU",
-		"used_cpu_sys:0.00",
-		"used_cpu_user:0.00",
-	}, "\r\n")
+	var lines []string
+	lines = append(lines, "# CPU")
+	lines = append(lines, "used_cpu_sys:0.000000")
+	lines = append(lines, "used_cpu_user:0.000000")
+	lines = append(lines, "used_cpu_sys_children:0.000000")
+	lines = append(lines, "used_cpu_user_children:0.000000")
+	lines = append(lines, "used_cpu_sys_main_thread:0.000000")
+	lines = append(lines, "used_cpu_user_main_thread:0.000000")
+	return strings.Join(lines, "\r\n")
 }
 
 func (c Info) infoModules() string {
-	return strings.Join([]string{
-		"# Modules",
-	}, "\r\n")
+	return "# Modules"
 }
 
 func (c Info) infoCluster() string {
-	return strings.Join([]string{
-		"# Cluster",
-		"cluster_enabled:0",
-	}, "\r\n")
+	return "# Cluster\r\ncluster_enabled:0"
 }
 
 func (c Info) infoErrorStats() string {
-	return strings.Join([]string{
-		"# Errorstats",
-	}, "\r\n")
+	return "# Errorstats"
 }
 
 func (c Info) infoKeyspace(w redis.Writer, red redis.Redka) string {
+	var lines []string
+	lines = append(lines, "# Keyspace")
+
+	// Report current database
 	dbIdx := redis.GetSelectedDB(w)
 	keyCount, err := red.Key().Len()
 	if err != nil {
 		keyCount = 0
 	}
-	return strings.Join([]string{
-		"# Keyspace",
-		fmt.Sprintf("db%d:keys=%d,expires=0,avg_ttl=0", dbIdx, keyCount),
-	}, "\r\n")
+	if keyCount > 0 {
+		lines = append(lines, fmt.Sprintf("db%d:keys=%d,expires=0,avg_ttl=0", dbIdx, keyCount))
+	}
+
+	if len(lines) == 1 {
+		return "# Keyspace"
+	}
+	return strings.Join(lines, "\r\n")
 }
 
 func normalizeInfoSections(sections []string) []string {
@@ -257,7 +423,6 @@ func infoAllSections() []string {
 }
 
 func infoEverythingSections() []string {
-	// No module-generated sections yet, so keep this equal to all.
 	return infoAllSections()
 }
 
@@ -267,4 +432,44 @@ func infoRuntimeSnapshot(w redis.Writer) redis.RuntimeSnapshot {
 		return redis.RuntimeSnapshot{}
 	}
 	return stats.Snapshot(time.Now())
+}
+
+// --- Helper functions ---
+
+func formatBytes(n int64) string {
+	if n <= 0 {
+		return "0B"
+	}
+	const unit = int64(1024)
+	if n < unit {
+		return strconv.FormatInt(n, 10) + "B"
+	}
+	div, _ := divMod(n, unit)
+	if div < unit {
+		return strconv.FormatInt(div, 10) + "K"
+	}
+	div, _ = divMod(div, unit)
+	if div < unit {
+		return strconv.FormatInt(div, 10) + "M"
+	}
+	div, _ = divMod(div, unit)
+	return strconv.FormatInt(div, 10) + "G"
+}
+
+func divMod(a, b int64) (int64, int64) {
+	return a / b, a % b
+}
+
+func percentage(a, b uint64) string {
+	if b == 0 {
+		return "0.00%"
+	}
+	return strconv.FormatFloat(float64(a)/float64(b)*100, 'f', 2, 64) + "%"
+}
+
+func ratio(a, b uint64) string {
+	if b == 0 {
+		return "0.00"
+	}
+	return strconv.FormatFloat(float64(a)/float64(b), 'f', 2, 64)
 }
