@@ -77,9 +77,7 @@ func (d *DB) Count(keys ...string) (int, error) {
 // Delete deletes keys and their values, regardless of the type.
 // Returns the number of deleted keys. Non-existing keys are ignored.
 func (d *DB) Delete(keys ...string) (int, error) {
-	now := time.Now().UnixMilli()
 	result := d.store.DB.Where("kdb = ? AND kname IN ?", d.dbIdx, keys).
-		Scopes(store.NotExpired(now)).
 		Delete(&store.RKey{})
 	if result.Error != nil {
 		return 0, result.Error
@@ -154,16 +152,12 @@ func (d *DB) Expire(key string, ttl time.Duration) error {
 // the key is expired and no longer exists.
 // If the key does not exist, returns ErrNotFound.
 func (d *DB) ExpireAt(key string, at time.Time) error {
-	etime := at.UnixMilli()
-
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
 		result := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			Updates(map[string]any{
 				"kver":      gorm.Expr("kver + 1"),
-				"expire_at": etime,
+				"expire_at": at.UnixMilli(),
 			})
 		if result.Error != nil {
 			return result.Error
@@ -246,10 +240,8 @@ func (d *DB) Len() (int, error) {
 // If the key does not exist, returns ErrNotFound.
 func (d *DB) Persist(key string) error {
 	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
 		result := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			Updates(map[string]any{
 				"kver":      gorm.Expr("kver + 1"),
 				"expire_at": nil,
@@ -302,7 +294,6 @@ func (d *DB) Rename(key, newKey string) error {
 		var oldK store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			First(&oldK).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -314,7 +305,6 @@ func (d *DB) Rename(key, newKey string) error {
 		var newK store.RKey
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, newKey).
-			Scopes(store.NotExpired(now)).
 			First(&newK).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -353,7 +343,6 @@ func (d *DB) RenameNotExists(key, newKey string) (bool, error) {
 		var oldK store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			First(&oldK).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -365,7 +354,6 @@ func (d *DB) RenameNotExists(key, newKey string) (bool, error) {
 		var newK store.RKey
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, newKey).
-			Scopes(store.NotExpired(now)).
 			First(&newK).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err

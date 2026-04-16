@@ -74,7 +74,6 @@ func (d *DB) Add(key string, elem any, score float64) (bool, error) {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			First(&rkey).Error
 
 		switch {
@@ -160,7 +159,6 @@ func (d *DB) AddMany(key string, items map[any]float64) (int, error) {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			First(&rkey).Error
 
 		switch {
@@ -289,7 +287,6 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -446,7 +443,6 @@ func (d *DB) Incr(key string, elem any, delta float64) (float64, error) {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			First(&rkey).Error
 
 		switch {
@@ -681,7 +677,6 @@ func (d *DB) DeleteByRank(key string, start, stop int) (int, error) {
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			First(&keyMeta).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -741,7 +736,6 @@ func (d *DB) DeleteByScore(key string, min, max float64) (int, error) {
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
 			First(&keyMeta).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -1094,7 +1088,6 @@ func (c DeleteCmd) deleteRank(now int64) (int, error) {
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = 5", c.db.dbIdx, c.key).
-			Scopes(store.NotExpired(now)).
 			First(&keyMeta).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -1153,7 +1146,6 @@ func (c DeleteCmd) deleteScore(now int64) (int, error) {
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = 5", c.db.dbIdx, c.key).
-			Scopes(store.NotExpired(now)).
 			First(&keyMeta).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
