@@ -44,14 +44,40 @@ func (d *DB) WithDB(dbIdx int) *DB {
 // If the key does not exist or is not a string, returns ErrNotFound.
 func (d *DB) Get(key string) (core.Value, error) {
 	now := time.Now().UnixMilli()
+
+	var rkey store.RKey
+	err := d.store.DB.
+		Where("kdb = ? AND kname = ?", d.dbIdx, key).
+		First(&rkey).Error
+
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return core.Value{}, core.ErrNotFound
+	}
+	if err != nil {
+		return core.Value{}, err
+	}
+
+	// Lazy expiration: check if key is expired
+	if rkey.ExpireAt != nil && *rkey.ExpireAt <= now {
+		// Key is expired, delete it and return not found
+		d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+			tx.Where("kid = ?", rkey.ID).Delete(&store.RString{})
+			tx.Delete(&rkey)
+			return nil
+		})
+		return core.Value{}, core.ErrNotFound
+	}
+
+	if rkey.KType != 1 {
+		return core.Value{}, core.ErrKeyType
+	}
+
 	var result struct {
 		Value []byte
 	}
-	err := d.store.DB.Model(&store.RString{}).
-		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = 1").
-		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
-		Scopes(store.NotExpired(now)).
-		Select("rstring.kval as value").
+	err = d.store.DB.Model(&store.RString{}).
+		Where("kid = ?", rkey.ID).
+		Select("kval as value").
 		First(&result).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -365,14 +391,48 @@ func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
 				ModifiedAt: now,
 				KLen:       1,
 			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
+
+			// Try to create the key, handle unique constraint violation
+			err = tx.Create(&rkey).Error
+			if err != nil {
+				// Unique constraint violation - another transaction created the key
+				// Re-query to get the existing key
+				err = tx.Model(&store.RKey{}).
+					Where("kdb = ? AND kname = ?", d.dbIdx, key).
+					Scopes(store.NotExpired(now)).
+					First(&rkey).Error
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					// Key expired between our create attempt and re-query
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				// Update the existing key
+				if rkey.KType != 1 {
+					return core.ErrKeyType
+				}
 			}
+
 			rstr := store.RString{
 				KID:  rkey.ID,
 				KVal: vb,
 			}
-			return tx.Create(&rstr).Error
+			err = tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "kid"}},
+				DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+			}).Create(&rstr).Error
+			if err != nil {
+				return err
+			}
+			return tx.Model(&store.RKey{}).
+				Where("id = ?", rkey.ID).
+				Updates(map[string]interface{}{
+					"kver":        gorm.Expr("kver + 1"),
+					"expire_at":   expireAt,
+					"modified_at": now,
+					"klen":        1,
+				}).Error
 
 		case err != nil:
 			return err
@@ -545,6 +605,7 @@ type SetCmd struct {
 	val      any
 	ifExists bool
 	ifNX     bool
+	get      bool
 	ttl      time.Duration
 	at       time.Time
 	keepTTL  bool
@@ -584,6 +645,12 @@ func (cmd SetCmd) KeepTTL() SetCmd {
 	return cmd
 }
 
+// Get returns the previous value after setting.
+func (cmd SetCmd) Get() SetCmd {
+	cmd.get = true
+	return cmd
+}
+
 // SetResult represents the result of a SET operation.
 type SetResult struct {
 	Updated bool
@@ -592,109 +659,74 @@ type SetResult struct {
 }
 
 // Run executes the set command with the configured options.
+// This implementation delegates to the individual methods for cleaner code.
 func (cmd SetCmd) Run() (SetResult, error) {
 	result := SetResult{}
 
-	if cmd.ifExists {
-		err := cmd.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-			now := time.Now().UnixMilli()
-			var rkey store.RKey
-			err := tx.Model(&store.RKey{}).
-				Where("kdb = ? AND kname = ?", cmd.db.dbIdx, cmd.key).
-				Scopes(store.NotExpired(now)).
-				Clauses(store.ForUpdate()).
-				First(&rkey).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
-			}
+	// Handle GET option alone or with other options
+	if cmd.get {
+		// GET + NX: only set if key doesn't exist, return previous value
+		if cmd.ifNX {
+			prev, created, err := cmd.db.SetNXGet(cmd.key, cmd.val, cmd.ttl)
 			if err != nil {
-				return err
+				return result, err
 			}
-			if rkey.KType != 1 {
-				return core.ErrKeyType
-			}
+			result.Prev = prev
+			result.Created = created
+			return result, nil
+		}
 
-			vb, err := core.ToBytes(cmd.val)
+		// GET + XX: only set if key exists, return previous value
+		if cmd.ifExists {
+			prev, updated, err := cmd.db.SetXXGet(cmd.key, cmd.val, cmd.ttl)
 			if err != nil {
-				return err
+				return result, err
 			}
+			result.Prev = prev
+			result.Updated = updated
+			return result, nil
+		}
 
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: vb,
-			}
-			err = tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "kid"}},
-				DoUpdates: clause.AssignmentColumns([]string{"kval"}),
-			}).Create(&rstr).Error
-			if err != nil {
-				return err
-			}
-
+		// GET alone: set value and return previous value
+		prev, err := cmd.db.SetGet(cmd.key, cmd.val)
+		if err != nil {
+			return result, err
+		}
+		result.Prev = prev
+		if len(prev) > 0 {
 			result.Updated = true
-			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"expire_at":   nil,
-					"modified_at": now,
-					"klen":        1,
-				}).Error
-		})
-		return result, err
+		} else {
+			result.Created = true
+		}
+		return result, nil
 	}
 
 	if cmd.ifNX {
-		err := cmd.db.store.Transaction(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
-			now := time.Now().UnixMilli()
-			var rkey store.RKey
-			err := tx.Model(&store.RKey{}).
-				Where("kdb = ? AND kname = ?", cmd.db.dbIdx, cmd.key).
-				Scopes(store.NotExpired(now)).
-				Clauses(store.ForUpdate()).
-				First(&rkey).Error
-			if err == nil {
-				// Key exists, NX should not overwrite
-				return nil
-			}
-			if !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
-			}
+		created, err := cmd.db.SetNXWithTTL(cmd.key, cmd.val, cmd.ttl)
+		if err != nil {
+			return result, err
+		}
+		result.Created = created
+		return result, nil
+	}
 
-			vb, err := core.ToBytes(cmd.val)
-			if err != nil {
-				return err
-			}
+	if cmd.ifExists {
+		updated, err := cmd.db.SetXXWithTTL(cmd.key, cmd.val, cmd.ttl)
+		if err != nil {
+			return result, err
+		}
+		result.Updated = updated
+		return result, nil
+	}
 
-			rkey = store.RKey{
-				KDB:        cmd.db.dbIdx,
-				KName:      cmd.key,
-				KType:      1,
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
-			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				// Handle unique constraint violation (key was created by another
-				// concurrent NX operation between our check and create)
-				if dialect.ConstraintFailed(err, "unique", "rkey", "kname") {
-					return nil // Key already exists, NX semantics: don't overwrite
-				}
-				return err
-			}
-
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: vb,
-			}
-			if err := tx.Create(&rstr).Error; err != nil {
-				return err
-			}
-
-			result.Created = true
-			return nil
-		})
-		return result, err
+	if cmd.keepTTL {
+		updated, err := cmd.db.SetKeepTTL(cmd.key, cmd.val)
+		if err != nil {
+			return result, err
+		}
+		result.Updated = updated
+		result.Created = updated
+		return result, nil
 	}
 
 	if cmd.ttl > 0 {
@@ -716,6 +748,461 @@ func (cmd SetCmd) Run() (SetResult, error) {
 func (cmd SetCmd) Exec() error {
 	_, err := cmd.Run()
 	return err
+}
+
+// SetNX sets the key to hold string value if key does not exist.
+// Returns true if the key was set, false if the key already exists.
+// This is the Redis SETNX command implementation.
+// Time complexity: O(1)
+//
+// SetNX is short for "SET if Not eXists".
+//
+// Design pattern: This can be used as a locking primitive.
+// For example, to acquire a lock:
+//   - Use SetNX to set the lock key with a unique value
+//   - If SetNX returns true, the lock is acquired
+//   - To release the lock, use Del (after verifying ownership)
+//
+// Note: Starting from Redis 2.6.12, SET with NX argument is preferred
+// over SETNX. This method provides direct SETNX semantics.
+func (d *DB) SetNX(key string, value any) (bool, error) {
+	return d.SetNXWithTTL(key, value, 0)
+}
+
+// SetNXWithTTL sets the key to hold string value if key does not exist.
+// If ttl > 0, sets the expiration time as well.
+// Returns true if the key was set, false if the key already exists.
+// This implements SET key value NX EX seconds / PX milliseconds.
+func (d *DB) SetNXWithTTL(key string, value any, ttl time.Duration) (bool, error) {
+	var created bool
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
+
+		var expireAt *int64
+		if ttl > 0 {
+			expire := now + ttl.Milliseconds()
+			expireAt = &expire
+		}
+
+		vb, err := core.ToBytes(value)
+		if err != nil {
+			return err
+		}
+
+		var rkey store.RKey
+		err = tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", d.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&rkey).Error
+
+		if err == nil {
+			if rkey.KType != 1 {
+				return core.ErrKeyType
+			}
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		rkey = store.RKey{
+			KDB:        d.dbIdx,
+			KName:      key,
+			KType:      1,
+			KVer:       1,
+			ExpireAt:   expireAt,
+			ModifiedAt: now,
+			KLen:       1,
+		}
+		if err := tx.Create(&rkey).Error; err != nil {
+			return err
+		}
+
+		rstr := store.RString{
+			KID:  rkey.ID,
+			KVal: vb,
+		}
+		if err := tx.Create(&rstr).Error; err != nil {
+			return err
+		}
+
+		created = true
+		return nil
+	})
+
+	return created, err
+}
+
+// SetXX sets the key to hold string value if key already exists.
+// Returns true if the key was updated, false if the key does not exist.
+// This is the Redis SET with XX option implementation.
+// Time complexity: O(1)
+func (d *DB) SetXX(key string, value any) (bool, error) {
+	return d.SetXXWithTTL(key, value, 0)
+}
+
+// SetXXWithTTL sets the key to hold string value if key already exists.
+// If ttl > 0, sets the expiration time as well.
+// Returns true if the key was updated, false if the key does not exist.
+// This implements SET key value XX EX seconds / PX milliseconds.
+func (d *DB) SetXXWithTTL(key string, value any, ttl time.Duration) (bool, error) {
+	var updated bool
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
+
+		var expireAt *int64
+		if ttl > 0 {
+			expire := now + ttl.Milliseconds()
+			expireAt = &expire
+		}
+
+		vb, err := core.ToBytes(value)
+		if err != nil {
+			return err
+		}
+
+		var rkey store.RKey
+		err = tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", d.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&rkey).Error
+
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		if rkey.KType != 1 {
+			return core.ErrKeyType
+		}
+
+		rstr := store.RString{
+			KID:  rkey.ID,
+			KVal: vb,
+		}
+		err = tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "kid"}},
+			DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+		}).Create(&rstr).Error
+		if err != nil {
+			return err
+		}
+
+		updated = true
+		return tx.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"kver":        gorm.Expr("kver + 1"),
+				"expire_at":   expireAt,
+				"modified_at": now,
+				"klen":        1,
+			}).Error
+	})
+
+	return updated, err
+}
+
+// SetNXGet sets the key to hold string value if key does not exist.
+// Returns the previous value and whether the key was created.
+// This implements SET key value NX GET semantics.
+func (d *DB) SetNXGet(key string, value any, ttl time.Duration) (core.Value, bool, error) {
+	var prev core.Value
+	var created bool
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+		now := time.Now().UnixMilli()
+
+		var expireAt *int64
+		if ttl > 0 {
+			expire := now + ttl.Milliseconds()
+			expireAt = &expire
+		}
+
+		vb, err := core.ToBytes(value)
+		if err != nil {
+			return err
+		}
+
+		var rkey store.RKey
+		err = tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", d.dbIdx, key).
+			Clauses(store.ForUpdate()).
+			First(&rkey).Error
+
+		if err == nil {
+			if rkey.KType != 1 {
+				return core.ErrKeyType
+			}
+
+			if rkey.ExpireAt != nil && *rkey.ExpireAt <= now {
+				tx.Where("kid = ?", rkey.ID).Delete(&store.RString{})
+				tx.Delete(&rkey)
+			} else {
+				var rstr store.RString
+				err = tx.Where("kid = ?", rkey.ID).First(&rstr).Error
+				if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+				if err == nil {
+					prev = core.Value(rstr.KVal)
+				}
+				return nil
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		rkey = store.RKey{
+			KDB:        d.dbIdx,
+			KName:      key,
+			KType:      1,
+			KVer:       1,
+			ExpireAt:   expireAt,
+			ModifiedAt: now,
+			KLen:       1,
+		}
+		if err := tx.Create(&rkey).Error; err != nil {
+			return err
+		}
+
+		rstr := store.RString{
+			KID:  rkey.ID,
+			KVal: vb,
+		}
+		if err := tx.Create(&rstr).Error; err != nil {
+			return err
+		}
+
+		created = true
+		return nil
+	})
+
+	return prev, created, err
+}
+
+// SetXXGet sets the key to hold string value if key already exists.
+// Returns the previous value and whether the key was updated.
+// This implements SET key value XX GET semantics.
+func (d *DB) SetXXGet(key string, value any, ttl time.Duration) (core.Value, bool, error) {
+	var prev core.Value
+	var updated bool
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
+
+		var expireAt *int64
+		if ttl > 0 {
+			expire := now + ttl.Milliseconds()
+			expireAt = &expire
+		}
+
+		vb, err := core.ToBytes(value)
+		if err != nil {
+			return err
+		}
+
+		var rkey store.RKey
+		err = tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", d.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&rkey).Error
+
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		if rkey.KType != 1 {
+			return core.ErrKeyType
+		}
+
+		var rstr store.RString
+		err = tx.Where("kid = ?", rkey.ID).First(&rstr).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err == nil {
+			prev = core.Value(rstr.KVal)
+		}
+
+		rstr.KVal = vb
+		err = tx.Save(&rstr).Error
+		if err != nil {
+			return err
+		}
+
+		updated = true
+		return tx.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"kver":        gorm.Expr("kver + 1"),
+				"expire_at":   expireAt,
+				"modified_at": now,
+				"klen":        1,
+			}).Error
+	})
+
+	return prev, updated, err
+}
+
+// SetGet sets the key to hold string value and returns the previous value.
+// Returns the previous value if the key existed, nil if the key did not exist.
+// This is the Redis SET with GET option implementation (added in Redis 6.2).
+// Time complexity: O(1)
+func (d *DB) SetGet(key string, value any) (core.Value, error) {
+	var prev core.Value
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
+
+		vb, err := core.ToBytes(value)
+		if err != nil {
+			return err
+		}
+
+		var rkey store.RKey
+		err = tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", d.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&rkey).Error
+
+		if err == nil {
+			if rkey.KType != 1 {
+				return core.ErrKeyType
+			}
+
+			var rstr store.RString
+			err = tx.Where("kid = ?", rkey.ID).First(&rstr).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			if err == nil {
+				prev = core.Value(rstr.KVal)
+			}
+
+			rstr.KVal = vb
+			err = tx.Save(&rstr).Error
+			if err != nil {
+				return err
+			}
+
+			return tx.Model(&store.RKey{}).
+				Where("id = ?", rkey.ID).
+				Updates(map[string]interface{}{
+					"kver":        gorm.Expr("kver + 1"),
+					"expire_at":   nil,
+					"modified_at": now,
+					"klen":        1,
+				}).Error
+		}
+
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		rkey = store.RKey{
+			KDB:        d.dbIdx,
+			KName:      key,
+			KType:      1,
+			KVer:       1,
+			ModifiedAt: now,
+			KLen:       1,
+		}
+		if err := tx.Create(&rkey).Error; err != nil {
+			return err
+		}
+
+		rstr := store.RString{
+			KID:  rkey.ID,
+			KVal: vb,
+		}
+		return tx.Create(&rstr).Error
+	})
+
+	return prev, err
+}
+
+// SetKeepTTL sets the key to hold string value while keeping the existing TTL.
+// Returns true if the key was updated, false if the key did not exist.
+// This is the Redis SET with KEEPTTL option implementation (added in Redis 6.0).
+// Time complexity: O(1)
+func (d *DB) SetKeepTTL(key string, value any) (bool, error) {
+	var updated bool
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		now := time.Now().UnixMilli()
+
+		vb, err := core.ToBytes(value)
+		if err != nil {
+			return err
+		}
+
+		var rkey store.RKey
+		err = tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", d.dbIdx, key).
+			Scopes(store.NotExpired(now)).
+			Clauses(store.ForUpdate()).
+			First(&rkey).Error
+
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			rkey = store.RKey{
+				KDB:        d.dbIdx,
+				KName:      key,
+				KType:      1,
+				KVer:       1,
+				ModifiedAt: now,
+				KLen:       1,
+			}
+			if err := tx.Create(&rkey).Error; err != nil {
+				return err
+			}
+
+			rstr := store.RString{
+				KID:  rkey.ID,
+				KVal: vb,
+			}
+			if err := tx.Create(&rstr).Error; err != nil {
+				return err
+			}
+
+			updated = true
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		if rkey.KType != 1 {
+			return core.ErrKeyType
+		}
+
+		rstr := store.RString{
+			KID:  rkey.ID,
+			KVal: vb,
+		}
+		err = tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "kid"}},
+			DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+		}).Create(&rstr).Error
+		if err != nil {
+			return err
+		}
+
+		updated = true
+		return tx.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"kver":        gorm.Expr("kver + 1"),
+				"modified_at": now,
+				"klen":        1,
+			}).Error
+	})
+
+	return updated, err
 }
 
 // StrLen returns the length of the string value.

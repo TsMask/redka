@@ -85,6 +85,9 @@ func (cmd Set) Run(w redis.Writer, red redis.Redka) (any, error) {
 	} else if cmd.ifNX {
 		op = op.IfNotExists()
 	}
+	if cmd.get {
+		op = op.Get()
+	}
 	if cmd.ttl > 0 {
 		op = op.TTL(cmd.ttl)
 	} else if !cmd.at.IsZero() {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/tsmask/redka/config"
 	"github.com/tsmask/redka/internal/store"
@@ -25,12 +26,19 @@ func init() {
 func main() {
 	cfg := config.FlagConfig()
 	config.LoggerConfig(cfg)
+
 	// Open the database.
 	db, err := store.Open(cfg.DBDSN)
 	if err != nil {
 		slog.Error("data source", "error", err)
 		os.Exit(1)
 	}
+	// Cleanup expired keys on startup
+	if _, err = db.CleanupExpiredKeys(); err != nil {
+		slog.Warn("cleanup expired keys on startup", "error", err)
+	}
+	// Start background cleanup service
+	db.StartCleanupTicker(time.Duration(cfg.CleanupInterval) * time.Second)
 
 	fmt.Printf("Redka By %s\n", db.Dialect)
 	fmt.Printf("Version: %s\nCommit: %s\nBuiltAt: %s\n", config.Version, config.Commit, config.Date)

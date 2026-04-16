@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Redka 全命令 redis-cli 功能测试脚本
-# 用法: ./test-redis-cli.sh [port] [host] [password]
+# 用法: ./test_redis-cli.sh [port] [host] [password]
 #
 # 覆盖 server/internal/command/command.go 中支持的命令
 

@@ -106,6 +106,12 @@ type RStr interface {
 	Set(key string, value any) error
 	SetExpire(key string, value any, ttl time.Duration) error
 	SetMany(items map[string]any) error
+	SetNX(key string, value any) (bool, error)
+	SetNXWithTTL(key string, value any, ttl time.Duration) (bool, error)
+	SetXX(key string, value any) (bool, error)
+	SetXXWithTTL(key string, value any, ttl time.Duration) (bool, error)
+	SetGet(key string, value any) (core.Value, error)
+	SetKeepTTL(key string, value any) (bool, error)
 	SetRange(key string, offset int, value []byte) (int, error)
 	SetWith(key string, value any) rstring.SetCmd
 }

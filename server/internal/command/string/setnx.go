@@ -22,15 +22,15 @@ func ParseSetNX(b redis.BaseCmd) (SetNX, error) {
 }
 
 func (cmd SetNX) Run(w redis.Writer, red redis.Redka) (any, error) {
-	out, err := red.Str().SetWith(cmd.key, cmd.value).IfNotExists().Run()
+	created, err := red.Str().SetNX(cmd.key, cmd.value)
 	if err != nil {
 		w.WriteError(cmd.Error(err))
 		return nil, err
 	}
-	if out.Created {
+	if created {
 		w.WriteInt(1)
 	} else {
 		w.WriteInt(0)
 	}
-	return out.Created, nil
+	return created, nil
 }

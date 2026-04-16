@@ -35,6 +35,9 @@ type ServerConfig struct {
 	SlowlogMaxLen    int `yaml:"slowlog_max_len"`   // Max slowlog entries (default: 128)
 	SlowlogThreshold int `yaml:"slowlog_threshold"` // Threshold in µs (default: 10000 = 10ms)
 
+	// Cleanup settings
+	CleanupInterval int `yaml:"cleanup_interval"` // Cleanup interval in seconds (default: 10)
+
 	// Logging settings
 	Verbose bool   `yaml:"verbose"`  // Enable verbose logging
 	LogFile string `yaml:"log_file"` // Log file path (optional)
@@ -51,6 +54,7 @@ func DefaultConfig() *ServerConfig {
 		Databases:        16,    // Redis default
 		SlowlogMaxLen:    128,   // Redis default
 		SlowlogThreshold: 10000, // 10ms in µs (Redis default)
+		CleanupInterval:  10,    // 10 seconds (similar to Redis expiration check)
 		Verbose:          false,
 		LogFile:          "/tmp/redka.log",
 	}

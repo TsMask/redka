@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -13,6 +15,9 @@ import (
 type Store struct {
 	Dialect Dialect  // database dialect
 	DB      *gorm.DB // primary database handle
+
+	cleanupTicker *time.Ticker  // timer for periodic cleanup
+	cleanupStop   chan struct{} // channel to stop cleanup goroutine
 }
 
 // Open creates a new database handle from a DSN.
@@ -41,13 +46,21 @@ func Open(dsn string) (*Store, error) {
 }
 
 func (s *Store) Transaction(ctx context.Context, fn func(gormTx *gorm.DB, dialect Dialect) error) error {
-	return s.DB.WithContext(ctx).Transaction(func(gormTx *gorm.DB) error {
-		return fn(gormTx, s.Dialect)
+	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return fn(tx, s.Dialect)
 	})
 }
 
-// Close closes the underlying sql.DB connection.
+// Close closes the underlying sql.DB connection and stops the cleanup service.
 func (s *Store) Close() error {
+	// Stop the cleanup service
+	if s.cleanupStop != nil {
+		close(s.cleanupStop)
+		s.cleanupStop = nil
+		s.cleanupTicker = nil
+	}
+
+	// Close the database connection
 	if s.DB == nil {
 		return nil
 	}
@@ -75,6 +88,64 @@ func (s *Store) Migrate() error {
 		return fmt.Errorf("auto migrate: %w", err)
 	}
 	return nil
+}
+
+// CleanupExpiredKeys cleans up expired keys from the database.
+// This performs a one-time cleanup and returns the number of deleted keys.
+// Note: This uses separate DELETE statements without transaction to avoid deadlocks
+// in high-concurrency scenarios.
+func (s *Store) CleanupExpiredKeys() (int, error) {
+	now := s.DB.NowFunc().UnixMilli()
+
+	var expiredIDs []int
+	err := s.DB.Model(&RKey{}).
+		Where("expire_at IS NOT NULL AND expire_at <= ?", now).
+		Pluck("id", &expiredIDs).Error
+	if err != nil {
+		return 0, err
+	}
+
+	if len(expiredIDs) == 0 {
+		return 0, nil
+	}
+
+	// Use separate DELETE statements without transaction to avoid deadlocks
+	// Each DELETE is independent and auto-committed
+	s.DB.Exec("DELETE FROM rstring WHERE kid IN ?", expiredIDs)
+	s.DB.Exec("DELETE FROM rhash WHERE kid IN ?", expiredIDs)
+	s.DB.Exec("DELETE FROM rlist WHERE kid IN ?", expiredIDs)
+	s.DB.Exec("DELETE FROM rset WHERE kid IN ?", expiredIDs)
+	s.DB.Exec("DELETE FROM rzset WHERE kid IN ?", expiredIDs)
+	result := s.DB.Exec("DELETE FROM rkey WHERE id IN ?", expiredIDs)
+
+	return int(result.RowsAffected), result.Error
+}
+
+// StartCleanupTicker starts a background goroutine that periodically cleans up
+// expired keys. The interval parameter controls how often cleanup runs.
+// This method starts the cleanup goroutine and stores the ticker/stop channel
+// in the Store struct. Call Close() to stop the cleanup service.
+func (s *Store) StartCleanupTicker(interval time.Duration) {
+	s.cleanupStop = make(chan struct{})
+	s.cleanupTicker = time.NewTicker(interval)
+
+	go func() {
+		defer s.cleanupTicker.Stop()
+		for {
+			select {
+			case <-s.cleanupTicker.C:
+				deleted, err := s.CleanupExpiredKeys()
+				if err != nil {
+					slog.Warn("cleanup expired keys", "error", err)
+				} else if deleted > 0 {
+					slog.Info("cleanup expired keys", "deleted", deleted)
+				}
+			case <-s.cleanupStop:
+				slog.Info("cleanup service stopped")
+				return
+			}
+		}
+	}()
 }
 
 // gormConfig returns the GORM configuration.

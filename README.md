@@ -116,10 +116,10 @@ redka/
 
 ```bash
 # 运行功能测试脚本（需先启动服务）
-./test-redis-cli.sh [port] [host] [password]
+./scripts/test/test_redis-cli.sh [port] [host] [password]
 
 # 示例
-./test-redis-cli.sh 6380 127.0.0.1 password
+bash ./scripts/test/test_set_commands.sh 6380 localhost password
 ```
 
 测试脚本会自动检测 command.go 中支持的全部命令，确保测试覆盖完整。
