@@ -37,6 +37,8 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 		return server.ParseInfo(b)
 	case "lolwut":
 		return server.ParseLolwut(b)
+	case "slowlog":
+		return server.ParseSlowLog(b)
 
 	// memory
 	case "memory":

@@ -10,6 +10,7 @@ import (
 	"github.com/tsmask/redka/config"
 	"github.com/tsmask/redka/internal/store"
 	"github.com/tsmask/redka/server/internal/redis"
+	"github.com/tsmask/redka/server/internal/slowlog"
 )
 
 // A Redis-compatible Redka server that uses the RESP protocol.
@@ -37,12 +38,15 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 	runtimeStats := redis.NewRuntimeStats(time.Now(), redis.NewRuntimeRunID())
 	clientRegistry := redis.InitClientRegistry()
 
-	handler := createHandlers(db, clientRegistry)
-
 	// Use provided config or default
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
+
+	// Create slowlog with config values (threshold in µs → Duration)
+	slowLog := slowlog.New(cfg.SlowlogMaxLen, time.Duration(cfg.SlowlogThreshold)*time.Microsecond)
+
+	handler := createHandlers(db, clientRegistry, slowLog)
 
 	accept := func(conn redcon.Conn) bool {
 		// Initialize connection context map with config
@@ -50,6 +54,7 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 		ctx[redis.CtxKeyConfig] = cfg
 		ctx[redis.CtxKeyRuntime] = runtimeStats
 		ctx[redis.CtxKeyClientRegistry] = clientRegistry
+		ctx[redis.CtxKeySlowLog] = slowLog
 		conn.SetContext(ctx)
 
 		// Register the client

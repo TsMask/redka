@@ -31,6 +31,10 @@ type ServerConfig struct {
 	Password  string `yaml:"password"`  // Redka server authentication password
 	Databases int    `yaml:"databases"` // Number of databases (default: 16)
 
+	// Slow log settings
+	SlowlogMaxLen    int `yaml:"slowlog_max_len"`   // Max slowlog entries (default: 128)
+	SlowlogThreshold int `yaml:"slowlog_threshold"` // Threshold in µs (default: 10000 = 10ms)
+
 	// Logging settings
 	Verbose bool   `yaml:"verbose"`  // Enable verbose logging
 	LogFile string `yaml:"log_file"` // Log file path (optional)
@@ -39,14 +43,16 @@ type ServerConfig struct {
 // DefaultConfig returns a configuration with default values.
 func DefaultConfig() *ServerConfig {
 	return &ServerConfig{
-		Host:      "0.0.0.0",
-		Port:      6379,
-		Sock:      "",
-		DBDSN:     "file:/tmp/redka.sqlite?vfs=memdb", // Default to SQLite memory
-		Password:  "",
-		Databases: 16, // Redis default
-		Verbose:   false,
-		LogFile:   "/tmp/redka.log",
+		Host:             "0.0.0.0",
+		Port:             6379,
+		Sock:             "",
+		DBDSN:            "file:/tmp/redka.sqlite?vfs=memdb", // Default to SQLite memory
+		Password:         "",
+		Databases:        16,    // Redis default
+		SlowlogMaxLen:    128,   // Redis default
+		SlowlogThreshold: 10000, // 10ms in µs (Redis default)
+		Verbose:          false,
+		LogFile:          "/tmp/redka.log",
 	}
 }
 

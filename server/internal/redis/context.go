@@ -31,6 +31,7 @@ const (
 	CtxKeyClientLibName       = "client_lib_name"       // Client library name
 	CtxKeyClientLibVer        = "client_lib_ver"        // Client library version
 	CtxKeyClientInfo          = "client_info"           // Custom client info map
+	CtxKeySlowLog             = "slowlog"               // SlowLog getter (defined in slowlog package)
 )
 
 // ConnWriter wraps a redcon.Conn to implement the Writer interface.

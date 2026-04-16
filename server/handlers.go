@@ -10,11 +10,12 @@ import (
 	"github.com/tsmask/redka/internal/store"
 	"github.com/tsmask/redka/server/internal/command"
 	"github.com/tsmask/redka/server/internal/redis"
+	"github.com/tsmask/redka/server/internal/slowlog"
 	"gorm.io/gorm"
 )
 
 // createHandlers returns the server command handlers.
-func createHandlers(db *store.Store, clientRegistry *redis.ClientRegistry) redcon.HandlerFunc {
+func createHandlers(db *store.Store, clientRegistry *redis.ClientRegistry, slowLog *slowlog.SlowLog) redcon.HandlerFunc {
 	return timeout(
 		logging(
 			auth(
@@ -24,6 +25,7 @@ func createHandlers(db *store.Store, clientRegistry *redis.ClientRegistry) redco
 					),
 				),
 			),
+			slowLog,
 		),
 		60*time.Second,
 	)
@@ -105,7 +107,7 @@ func timeout(next redcon.HandlerFunc, timeout time.Duration) redcon.HandlerFunc 
 const slowQueryThreshold = 100 * time.Millisecond
 
 // logging logs the command processing time and marks slow queries.
-func logging(next redcon.HandlerFunc) redcon.HandlerFunc {
+func logging(next redcon.HandlerFunc, sl *slowlog.SlowLog) redcon.HandlerFunc {
 	return func(conn redcon.Conn, cmd redcon.Command) {
 		start := time.Now()
 		next(conn, cmd)
@@ -118,13 +120,19 @@ func logging(next redcon.HandlerFunc) redcon.HandlerFunc {
 				"duration", elapsed,
 				"threshold", slowQueryThreshold,
 			)
-		} else {
-			slog.Debug("process command",
-				"client", conn.RemoteAddr(),
-				"name", string(cmd.Args[0]),
-				"time", elapsed,
-			)
 		}
+
+		// Push to slow log if exceeds threshold
+		if sl != nil && elapsed >= sl.Threshold() {
+			clientName := redis.GetClientName(redis.NewConnWriter(conn))
+			sl.Push(elapsed, cmd.Args, conn.RemoteAddr(), clientName)
+		}
+
+		slog.Debug("process command",
+			"client", conn.RemoteAddr(),
+			"name", string(cmd.Args[0]),
+			"time", elapsed,
+		)
 	}
 }
 
