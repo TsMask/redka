@@ -65,7 +65,6 @@ func (d *DB) Delete(key string, elem any) (int, error) {
 			Select("id").
 			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			n = 0
@@ -195,7 +194,6 @@ func (d *DB) PopBack(key string) (core.Value, error) {
 			Select("id", "klen").
 			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -251,7 +249,6 @@ func (d *DB) PopFront(key string) (core.Value, error) {
 			Select("id", "klen").
 			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -317,7 +314,6 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 			Select("id", "ktype", "klen").
 			Where("kdb = ? AND kname = ?", d.dbIdx, firstKey).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&firstKeyRecord).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				// firstKey 不存在，创建它
@@ -356,7 +352,6 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 				Select("id", "ktype", "klen").
 				Where("kdb = ? AND kname = ?", d.dbIdx, secondKey).
 				Scopes(store.NotExpired(now)).
-				Clauses(store.ForUpdate()).
 				First(&destKey).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				destKey = store.RKey{
@@ -387,7 +382,6 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 				Select("id", "ktype", "klen").
 				Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, secondKey).
 				Scopes(store.NotExpired(now)).
-				Clauses(store.ForUpdate()).
 				First(&srcKey).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return core.ErrNotFound
@@ -542,7 +536,6 @@ func (d *DB) Set(key string, idx int, elem any) error {
 			Select("id", "klen").
 			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -600,7 +593,6 @@ func (d *DB) Trim(key string, start, stop int) error {
 			Select("id", "klen").
 			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -685,7 +677,6 @@ func (d *DB) delete(key string, elem any, count int, fromBack bool) (int, error)
 			Select("id").
 			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			deleted = 0
@@ -755,7 +746,6 @@ func (d *DB) insert(key string, pivot any, elem any, after bool) (int, error) {
 			Select("id", "klen").
 			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -867,7 +857,6 @@ func (d *DB) push(key string, elem any, back bool) (int, error) {
 			Select("id", "ktype", "klen").
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		switch {

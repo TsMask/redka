@@ -2,7 +2,6 @@ package store
 
 import (
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // NotExpired returns a GORM scope that filters keys that have not expired.
@@ -43,16 +42,5 @@ func RandomOrder(dialect Dialect) func(db *gorm.DB) *gorm.DB {
 		default:
 			return db
 		}
-	}
-}
-
-// ForUpdate returns a GORM clause for row-level locking (SELECT FOR UPDATE).
-// This prevents race conditions in concurrent read-modify-write operations.
-// For SQLite, this is a no-op because SQLite uses database-level locking
-// via BEGIN IMMEDIATE transactions (configured in sqliteDataSource).
-func ForUpdate() clause.Locking {
-	return clause.Locking{
-		Strength: "UPDATE",
-		// Options:  "NOWAIT",
 	}
 }

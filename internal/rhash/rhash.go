@@ -90,7 +90,6 @@ func (d *DB) Delete(key string, fields ...string) (int, error) {
 			Select("id").
 			Where("kdb = ? AND kname = ? AND ktype = 4", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -213,7 +212,6 @@ func (d *DB) Incr(key, field string, delta int) (int, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		switch {
@@ -299,7 +297,6 @@ func (d *DB) IncrFloat(key, field string, delta float64) (float64, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		switch {
@@ -585,7 +582,6 @@ func (d *DB) Set(key, field string, value any) (bool, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		switch {
@@ -685,7 +681,6 @@ func (d *DB) SetMany(key string, items map[string]any) (int, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		switch {
@@ -885,7 +880,6 @@ func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		switch {

@@ -161,7 +161,6 @@ func (d *DB) ExpireAt(key string, at time.Time) error {
 		result := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			Updates(map[string]any{
 				"kver":      gorm.Expr("kver + 1"),
 				"expire_at": etime,
@@ -251,7 +250,6 @@ func (d *DB) Persist(key string) error {
 		result := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			Updates(map[string]any{
 				"kver":      gorm.Expr("kver + 1"),
 				"expire_at": nil,
@@ -305,7 +303,6 @@ func (d *DB) Rename(key, newKey string) error {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&oldK).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -357,7 +354,6 @@ func (d *DB) RenameNotExists(key, newKey string) (bool, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&oldK).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound

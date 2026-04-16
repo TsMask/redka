@@ -132,7 +132,6 @@ func (d *DB) Incr(key string, delta int) (int, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			rkey = store.RKey{
@@ -217,7 +216,6 @@ func (d *DB) IncrFloat(key string, delta float64) (float64, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			rkey = store.RKey{
@@ -304,7 +302,6 @@ func (d *DB) Set(key string, value any) error {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		switch {
@@ -377,7 +374,6 @@ func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		switch {
@@ -494,7 +490,6 @@ func (d *DB) SetMany(items map[string]any) error {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname IN ?", d.dbIdx, keyNames).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			Find(&existingKeys).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -793,7 +788,6 @@ func (d *DB) SetNXWithTTL(key string, value any, ttl time.Duration) (bool, error
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		if err == nil {
@@ -866,7 +860,6 @@ func (d *DB) SetXXWithTTL(key string, value any, ttl time.Duration) (bool, error
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -929,7 +922,6 @@ func (d *DB) SetNXGet(key string, value any, ttl time.Duration) (core.Value, boo
 		var rkey store.RKey
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		if err == nil {
@@ -1007,7 +999,6 @@ func (d *DB) SetXXGet(key string, value any, ttl time.Duration) (core.Value, boo
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1068,7 +1059,6 @@ func (d *DB) SetGet(key string, value any) (core.Value, error) {
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		if err == nil {
@@ -1145,7 +1135,6 @@ func (d *DB) SetKeepTTL(key string, value any) (bool, error) {
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1240,7 +1229,6 @@ func (d *DB) Append(key string, value []byte) (int, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		switch {
@@ -1324,7 +1312,6 @@ func (d *DB) SetRange(key string, offset int, value []byte) (int, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 
 		var existingBytes []byte

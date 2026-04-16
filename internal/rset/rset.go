@@ -91,7 +91,6 @@ func (d *DB) Add(key string, elems ...any) (int, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		switch {
 		case err == nil:
@@ -179,7 +178,6 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, keyTypeSet).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			n = 0
@@ -579,7 +577,6 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, firstKey).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&firstKeyRecord).Error
 
 		// 根据 firstKey 是 src 还是 dest 来处理
@@ -603,7 +600,6 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 			err = tx.Model(&store.RKey{}).
 				Where("kdb = ? AND kname = ?", d.dbIdx, secondKey).
 				Scopes(store.NotExpired(now)).
-				Clauses(store.ForUpdate()).
 				First(&destKey).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				destKey = store.RKey{
@@ -648,7 +644,6 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 			err = tx.Model(&store.RKey{}).
 				Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, secondKey, keyTypeSet).
 				Scopes(store.NotExpired(now)).
-				Clauses(store.ForUpdate()).
 				First(&srcKey).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return core.ErrNotFound
@@ -729,7 +724,6 @@ func (d *DB) Pop(key string) (core.Value, error) {
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, keyTypeSet).
 			Scopes(store.NotExpired(now)).
-			Clauses(store.ForUpdate()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
