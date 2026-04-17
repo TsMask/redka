@@ -36,8 +36,12 @@ type RuntimeStats struct {
 	evictedKeys    atomic.Int64
 
 	// Error stats: error type -> count
-	errorStats     map[string]int64
-	errorStatsMu   sync.RWMutex
+	errorStats   map[string]int64
+	errorStatsMu sync.RWMutex
+
+	// Memory stats
+	peakMemoryMu sync.Mutex
+	peakMemory   int64
 }
 
 // RuntimeSnapshot is a point-in-time view of runtime counters.
@@ -59,6 +63,7 @@ type RuntimeSnapshot struct {
 	LruClock                 int64
 	ServerTimeUsec           int64
 	ErrorStats               map[string]int64
+	PeakMemory               int64
 }
 
 // NewRuntimeStats creates an initialized runtime stats container.
@@ -148,6 +153,7 @@ func (s *RuntimeStats) Snapshot(now time.Time) RuntimeSnapshot {
 		LruClock:                 int64(now.Unix() % (1 << 31)),
 		ServerTimeUsec:           now.UnixNano() / 1000,
 		ErrorStats:               s.GetErrorStats(),
+		PeakMemory:               s.GetPeakMemory(),
 	}
 }
 
@@ -213,4 +219,20 @@ func (s *RuntimeStats) GetErrorStats() map[string]int64 {
 		result[k] = v
 	}
 	return result
+}
+
+// UpdatePeakMemory updates the peak memory if the current allocation is higher.
+func (s *RuntimeStats) UpdatePeakMemory(currentAlloc int64) {
+	s.peakMemoryMu.Lock()
+	defer s.peakMemoryMu.Unlock()
+	if currentAlloc > s.peakMemory {
+		s.peakMemory = currentAlloc
+	}
+}
+
+// GetPeakMemory returns the peak memory usage.
+func (s *RuntimeStats) GetPeakMemory() int64 {
+	s.peakMemoryMu.Lock()
+	defer s.peakMemoryMu.Unlock()
+	return s.peakMemory
 }
