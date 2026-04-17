@@ -70,6 +70,22 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// Version returns the database server version string.
+func (s *Store) Version() (string, error) {
+	var version string
+	switch s.Dialect {
+	case DialectPostgres, DialectMySQL:
+		if err := s.DB.Raw("SELECT version()").Scan(&version).Error; err != nil {
+			return "", err
+		}
+	case DialectSQLite:
+		if err := s.DB.Raw("SELECT sqlite_version()").Scan(&version).Error; err != nil {
+			return "", err
+		}
+	}
+	return version, nil
+}
+
 // Migrate runs database migrations using GORM AutoMigrate.
 // Creates/updates tables from GORM model definitions.
 // Version tracking, mtime updates, and cardinality (len) tracking

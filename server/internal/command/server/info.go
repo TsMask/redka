@@ -70,7 +70,7 @@ func (c Info) buildInfo(sections []string, w redis.Writer, red redis.Redka) stri
 		case "cpu":
 			parts = append(parts, c.infoCPU())
 		case "modules":
-			parts = append(parts, c.infoModules())
+			parts = append(parts, c.infoModules(red))
 		case "cluster":
 			parts = append(parts, c.infoCluster())
 		case "errorstats":
@@ -409,8 +409,15 @@ func (c Info) infoCPU() string {
 	return strings.Join(lines, "\r\n")
 }
 
-func (c Info) infoModules() string {
-	return "# Modules"
+func (c Info) infoModules(red redis.Redka) string {
+	var lines []string
+	lines = append(lines, "# Modules")
+
+	s := red.Store()
+	ver, _ := s.Version()
+	lines = append(lines, fmt.Sprintf("module:name=%s,version=%s", s.Dialect, ver))
+
+	return strings.Join(lines, "\r\n")
 }
 
 func (c Info) infoCluster() string {
