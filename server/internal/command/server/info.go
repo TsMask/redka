@@ -90,6 +90,7 @@ func (c Info) infoServer(w redis.Writer, snap redis.RuntimeSnapshot) string {
 	cfg := redis.GetConfig(w)
 	port := 6379
 	host := "0.0.0.0"
+	configFile := ""
 	if cfg != nil {
 		if cfg.Port != 0 {
 			port = cfg.Port
@@ -97,6 +98,10 @@ func (c Info) infoServer(w redis.Writer, snap redis.RuntimeSnapshot) string {
 		if cfg.Host != "" {
 			host = cfg.Host
 		}
+		if cfg.ConfigFile != "" {
+			configFile = cfg.ConfigFile
+		}
+
 	}
 	mode := "standalone"
 	runID := snap.RunID
@@ -129,11 +134,11 @@ func (c Info) infoServer(w redis.Writer, snap redis.RuntimeSnapshot) string {
 	lines = append(lines, "server_time_usec:"+strconv.FormatInt(snap.ServerTimeUsec, 10))
 	lines = append(lines, "uptime_in_seconds:"+strconv.Itoa(up))
 	lines = append(lines, "uptime_in_days:"+strconv.Itoa(upDays))
-	lines = append(lines, "hz:10")
-	lines = append(lines, "configured_hz:10")
+	lines = append(lines, "hz:1")
+	lines = append(lines, "configured_hz:1")
 	lines = append(lines, "lru_clock:"+strconv.FormatInt(snap.LruClock, 10))
 	lines = append(lines, "executable:"+executable)
-	lines = append(lines, "config_file:")
+	lines = append(lines, "config_file:"+configFile)
 	lines = append(lines, "io_threads_active:"+ioThreadsActive)
 	lines = append(lines, "listener0:name=tcp,bind="+host+",port="+strconv.Itoa(port)+",proto=tcp")
 

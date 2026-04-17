@@ -19,6 +19,8 @@ var (
 
 // ServerConfig represents the server configuration.
 type ServerConfig struct {
+	ConfigFile string `yaml:"-"` // Path to the configuration file
+
 	// Server network settings
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
@@ -74,6 +76,7 @@ func Load(path string) (*ServerConfig, error) {
 		return nil, fmt.Errorf("parse config file: %w", err)
 	}
 
+	config.ConfigFile = path
 	return config, nil
 }
 
