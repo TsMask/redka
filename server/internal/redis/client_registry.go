@@ -108,11 +108,12 @@ type ClientRegistry struct {
 }
 
 type clientEntry struct {
-	info    ClientInfo
-	conn    redcon.Conn
-	mu      sync.Mutex
-	lastCmd time.Time
-	closed  atomic.Bool
+	info      ClientInfo
+	conn      redcon.Conn
+	mu        sync.Mutex
+	lastCmd   time.Time
+	connected time.Time
+	closed    atomic.Bool
 }
 
 // globalClientRegistry is the global registry for all client connections.
@@ -161,6 +162,7 @@ func (r *ClientRegistry) Add(conn redcon.Conn, db int) int64 {
 		}
 	}
 
+	now := time.Now()
 	entry := &clientEntry{
 		info: ClientInfo{
 			ID:     id,
@@ -173,8 +175,9 @@ func (r *ClientRegistry) Add(conn redcon.Conn, db int) int64 {
 			DB:     db,
 			Events: "rw",
 		},
-		conn:    conn,
-		lastCmd: time.Now(),
+		conn:      conn,
+		lastCmd:   now,
+		connected: now,
 	}
 	r.clients[int(id)] = entry
 	return id
@@ -198,6 +201,19 @@ func (r *ClientRegistry) Update(id int64, fn func(*ClientInfo)) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	fn(&entry.info)
+}
+
+// UpdateDB updates the database index for a given client ID.
+func (r *ClientRegistry) UpdateDB(id int64, db int) {
+	r.mu.RLock()
+	entry, ok := r.clients[int(id)]
+	r.mu.RUnlock()
+	if !ok {
+		return
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	entry.info.DB = db
 }
 
 // Touch updates the last command time.
@@ -235,17 +251,15 @@ func (r *ClientRegistry) List() []ClientInfo {
 	infos := make([]ClientInfo, 0, len(r.clients))
 	for _, entry := range r.clients {
 		entry.mu.Lock()
-		info := entry.info
-		info.Age = int64(now.Sub(entry.lastCmd).Seconds())
-		info.Idle = 0
 		if entry.closed.Load() {
 			entry.mu.Unlock()
 			continue
 		}
-		// Calculate idle time
-		if now.Sub(entry.lastCmd) > time.Minute {
-			info.Idle = int64(now.Sub(entry.lastCmd).Seconds())
-		}
+		info := entry.info
+		// Age is connection age since registration
+		info.Age = int64(now.Sub(entry.connected).Seconds())
+		// Idle is time since last command
+		info.Idle = int64(now.Sub(entry.lastCmd).Seconds())
 		entry.mu.Unlock()
 		infos = append(infos, info)
 	}

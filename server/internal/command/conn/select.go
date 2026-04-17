@@ -41,6 +41,14 @@ func (c Select) Run(w redis.Writer, red redis.Redka) (any, error) {
 
 	// Store the selected database in connection context
 	redis.SetSelectedDB(w, c.index)
+
+	// Sync DB to client registry
+	if registry := redis.GetClientRegistryFromWriter(w); registry != nil {
+		if id := redis.GetConnID(w); id != 0 {
+			registry.UpdateDB(id, c.index)
+		}
+	}
+
 	w.WriteString("OK")
 	return true, nil
 }
