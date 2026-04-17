@@ -11,13 +11,34 @@ import (
 type TypeID int
 
 const (
-	TypeAny    = TypeID(0)
-	TypeString = TypeID(1)
-	TypeList   = TypeID(2)
-	TypeSet    = TypeID(3)
-	TypeHash   = TypeID(4)
-	TypeZSet   = TypeID(5)
+	TypeAny    TypeID = 0
+	TypeString TypeID = 1
+	TypeList   TypeID = 2
+	TypeSet    TypeID = 3
+	TypeHash   TypeID = 4
+	TypeZSet   TypeID = 5
 )
+
+func (t TypeID) Value() int {
+	return int(t)
+}
+
+// Name returns the name of the key type.
+func (t TypeID) Name() string {
+	switch t {
+	case TypeString:
+		return "string"
+	case TypeList:
+		return "list"
+	case TypeSet:
+		return "set"
+	case TypeHash:
+		return "hash"
+	case TypeZSet:
+		return "zset"
+	}
+	return "unknown"
+}
 
 // Common errors returned by data structure methods.
 var (
@@ -40,29 +61,6 @@ type Key struct {
 	ETime   *int64 // expiration time in unix milliseconds
 	MTime   int64  // last modification time in unix milliseconds
 	Len     int    // length of the key value (number of elements)
-}
-
-// Exists reports whether the key exists.
-// Returns false for expired keys.
-func (k Key) Exists() bool {
-	return k.Key != ""
-}
-
-// TypeName returns the name of the key type.
-func (k Key) TypeName() string {
-	switch k.Type {
-	case TypeString:
-		return "string"
-	case TypeList:
-		return "list"
-	case TypeSet:
-		return "set"
-	case TypeHash:
-		return "hash"
-	case TypeZSet:
-		return "zset"
-	}
-	return "unknown"
 }
 
 // Value represents a value stored in a database (a byte slice).

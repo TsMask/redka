@@ -63,7 +63,7 @@ func (d *DB) Delete(key string, elem any) (int, error) {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id").
-			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			n = 0
@@ -117,7 +117,7 @@ func (d *DB) Get(key string, idx int) (core.Value, error) {
 	var rkey store.RKey
 	err := d.store.DB.Model(&store.RKey{}).
 		Select("id", "klen").
-		Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+		Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 		Scopes(store.NotExpired(now)).
 		First(&rkey).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -170,7 +170,7 @@ func (d *DB) Len(key string) (int, error) {
 	var rkey store.RKey
 	err := d.store.DB.Model(&store.RKey{}).
 		Select("klen").
-		Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+		Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 		Scopes(store.NotExpired(now)).
 		First(&rkey).Error
 
@@ -191,7 +191,7 @@ func (d *DB) PopBack(key string) (core.Value, error) {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
-			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -245,7 +245,7 @@ func (d *DB) PopFront(key string) (core.Value, error) {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
-			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -316,7 +316,7 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 				firstKeyRecord = store.RKey{
 					KDB:        d.dbIdx,
 					KName:      firstKey,
-					KType:      2,
+					KType:      core.TypeList.Value(),
 					KVer:       1,
 					ModifiedAt: now,
 					KLen:       0,
@@ -335,7 +335,7 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 
 		if firstKey == src {
 			// firstKey 是 src
-			if firstKeyRecord.KType != 2 {
+			if firstKeyRecord.KType != core.TypeList.Value() {
 				return core.ErrKeyType
 			}
 			if firstKeyRecord.KLen == 0 {
@@ -352,7 +352,7 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 				destKey = store.RKey{
 					KDB:        d.dbIdx,
 					KName:      dest,
-					KType:      2,
+					KType:      core.TypeList.Value(),
 					KVer:       1,
 					ModifiedAt: now,
 					KLen:       0,
@@ -362,12 +362,12 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 				}
 			} else if err != nil {
 				return err
-			} else if destKey.KType != 2 {
+			} else if destKey.KType != core.TypeList.Value() {
 				return core.ErrKeyType
 			}
 		} else {
 			// firstKey 是 dest
-			if firstKeyRecord.KType != 2 {
+			if firstKeyRecord.KType != core.TypeList.Value() {
 				return core.ErrKeyType
 			}
 			destKey = firstKeyRecord
@@ -375,7 +375,7 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 			// 检查 src
 			err := tx.Model(&store.RKey{}).
 				Select("id", "ktype", "klen").
-				Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, secondKey).
+				Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, secondKey, core.TypeList.Value()).
 				First(&srcKey).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return core.ErrNotFound
@@ -469,7 +469,7 @@ func (d *DB) Range(key string, start, stop int) ([]core.Value, error) {
 	var rkey store.RKey
 	err := d.store.DB.Model(&store.RKey{}).
 		Select("id", "klen").
-		Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+		Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 		Scopes(store.NotExpired(now)).
 		First(&rkey).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -528,7 +528,7 @@ func (d *DB) Set(key string, idx int, elem any) error {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
-			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -584,7 +584,7 @@ func (d *DB) Trim(key string, start, stop int) error {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
-			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -667,7 +667,7 @@ func (d *DB) delete(key string, elem any, count int, fromBack bool) (int, error)
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id").
-			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			deleted = 0
@@ -735,7 +735,7 @@ func (d *DB) insert(key string, pivot any, elem any, after bool) (int, error) {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id", "klen").
-			Where("kdb = ? AND kname = ? AND ktype = 2", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -850,7 +850,7 @@ func (d *DB) push(key string, elem any, back bool) (int, error) {
 
 		switch {
 		case err == nil:
-			if rkey.KType != 2 {
+			if rkey.KType != core.TypeList.Value() {
 				return core.ErrKeyType
 			}
 			if err := tx.Model(&store.RKey{}).
@@ -865,7 +865,7 @@ func (d *DB) push(key string, elem any, back bool) (int, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      2,
+				KType:      core.TypeList.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       0,

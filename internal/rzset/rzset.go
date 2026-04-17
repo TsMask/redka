@@ -81,7 +81,7 @@ func (d *DB) Add(key string, elem any, score float64) (bool, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      5,
+				KType:      core.TypeZSet.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -103,7 +103,7 @@ func (d *DB) Add(key string, elem any, score float64) (bool, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 5:
+		case rkey.KType != core.TypeZSet.Value():
 			return core.ErrKeyType
 
 		default:
@@ -166,7 +166,7 @@ func (d *DB) AddMany(key string, items map[any]float64) (int, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      5,
+				KType:      core.TypeZSet.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       0,
@@ -178,7 +178,7 @@ func (d *DB) AddMany(key string, items map[any]float64) (int, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 5:
+		case rkey.KType != core.TypeZSet.Value():
 			return core.ErrKeyType
 		}
 
@@ -262,7 +262,7 @@ func (d *DB) Count(key string, min, max float64) (int, error) {
 	err := d.store.DB.Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
-		Where("rkey.ktype = 5").
+		Where("rkey.ktype = ?", core.TypeZSet.Value()).
 		Scopes(store.NotExpired(now)).
 		Where("rzset.score BETWEEN ? AND ?", min, max).
 		Count(&count).Error
@@ -286,7 +286,7 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeZSet.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -450,7 +450,7 @@ func (d *DB) Incr(key string, elem any, delta float64) (float64, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      5,
+				KType:      core.TypeZSet.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -472,7 +472,7 @@ func (d *DB) Incr(key string, elem any, delta float64) (float64, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 5:
+		case rkey.KType != core.TypeZSet.Value():
 			return core.ErrKeyType
 
 		default:
@@ -676,7 +676,7 @@ func (d *DB) DeleteByRank(key string, start, stop int) (int, error) {
 		now := time.Now().UnixMilli()
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeZSet.Value()).
 			First(&keyMeta).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -735,7 +735,7 @@ func (d *DB) DeleteByScore(key string, min, max float64) (int, error) {
 		now := time.Now().UnixMilli()
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeZSet.Value()).
 			First(&keyMeta).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -771,7 +771,7 @@ func (d *DB) GetRange(key string, start, stop int) ([]core.Value, []float64, err
 
 	var keyMeta store.RKey
 	err := d.store.DB.Model(&store.RKey{}).
-		Where("kdb = ? AND kname = ? AND ktype = 5", d.dbIdx, key).
+		Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeZSet.Value()).
 		Scopes(store.NotExpired(now)).
 		First(&keyMeta).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -823,7 +823,7 @@ func (d *DB) GetRangeByScore(key string, min, max float64) ([]core.Value, []floa
 		Select("rzset.elem as elem, rzset.score as score").
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
-		Where("rkey.ktype = 5").
+		Where("rkey.ktype = ?", core.TypeZSet.Value()).
 		Scopes(store.NotExpired(now)).
 		Where("rzset.score BETWEEN ? AND ?", min, max).
 		Order("rzset.score ASC, rzset.elem ASC").
@@ -946,7 +946,7 @@ func (c RangeCmd) rangeRank() ([]SetItem, error) {
 	// Get the key ID
 	var keyMeta store.RKey
 	err := db.Model(&store.RKey{}).
-		Where("kdb = ? AND kname = ? AND ktype = 5", dbIdx, c.key).
+		Where("kdb = ? AND kname = ? AND ktype = ?", dbIdx, c.key, core.TypeZSet.Value()).
 		Scopes(store.NotExpired(now)).
 		First(&keyMeta).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -997,7 +997,7 @@ func (c RangeCmd) rangeScore() ([]SetItem, error) {
 	// Get the key ID
 	var keyMeta store.RKey
 	err := db.Model(&store.RKey{}).
-		Where("kdb = ? AND kname = ? AND ktype = 5", dbIdx, c.key).
+		Where("kdb = ? AND kname = ? AND ktype = ?", dbIdx, c.key, core.TypeZSet.Value()).
 		Scopes(store.NotExpired(now)).
 		First(&keyMeta).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1087,7 +1087,7 @@ func (c DeleteCmd) deleteRank(now int64) (int, error) {
 	err := c.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ? AND ktype = 5", c.db.dbIdx, c.key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", c.db.dbIdx, c.key, core.TypeZSet.Value()).
 			First(&keyMeta).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -1145,7 +1145,7 @@ func (c DeleteCmd) deleteScore(now int64) (int, error) {
 	err := c.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ? AND ktype = 5", c.db.dbIdx, c.key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", c.db.dbIdx, c.key, core.TypeZSet.Value()).
 			First(&keyMeta).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -1223,7 +1223,7 @@ func (c InterCmd) runTx(db *gorm.DB) ([]SetItem, error) {
 
 	var keyIDs []int
 	err := db.Model(&store.RKey{}).
-		Where("kdb = ? AND kname IN ? AND ktype = 5", c.db.dbIdx, c.keys).
+		Where("kdb = ? AND kname IN ? AND ktype = ?", c.db.dbIdx, c.keys, core.TypeZSet.Value()).
 		Scopes(store.NotExpired(now)).
 		Pluck("id", &keyIDs).Error
 	if err != nil {
@@ -1271,7 +1271,7 @@ func (c InterCmd) Store() (int, error) {
 		err = tx.Where("kdb = ? AND kname = ?", c.db.dbIdx, c.dest).First(&destKey).Error
 		switch {
 		case err == nil:
-			if destKey.KType != 5 {
+			if destKey.KType != core.TypeZSet.Value() {
 				return core.ErrKeyType
 			}
 			if err := tx.Where("kid = ?", destKey.ID).Delete(&store.RZSet{}).Error; err != nil {
@@ -1281,7 +1281,7 @@ func (c InterCmd) Store() (int, error) {
 			destKey = store.RKey{
 				KDB:        c.db.dbIdx,
 				KName:      c.dest,
-				KType:      5,
+				KType:      core.TypeZSet.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       0,
@@ -1371,7 +1371,7 @@ func (c UnionCmd) runTx(db *gorm.DB) ([]SetItem, error) {
 
 	var keyIDs []int
 	err := db.Model(&store.RKey{}).
-		Where("kdb = ? AND kname IN ? AND ktype = 5", c.db.dbIdx, c.keys).
+		Where("kdb = ? AND kname IN ? AND ktype = ?", c.db.dbIdx, c.keys, core.TypeZSet.Value()).
 		Scopes(store.NotExpired(now)).
 		Pluck("id", &keyIDs).Error
 	if err != nil {
@@ -1427,7 +1427,7 @@ func (c UnionCmd) Store() (int, error) {
 		err = tx.Where("kdb = ? AND kname = ?", c.db.dbIdx, c.dest).First(&destKey).Error
 		switch {
 		case err == nil:
-			if destKey.KType != 5 {
+			if destKey.KType != core.TypeZSet.Value() {
 				return core.ErrKeyType
 			}
 			if err := tx.Where("kid = ?", destKey.ID).Delete(&store.RZSet{}).Error; err != nil {
@@ -1437,7 +1437,7 @@ func (c UnionCmd) Store() (int, error) {
 			destKey = store.RKey{
 				KDB:        c.db.dbIdx,
 				KName:      c.dest,
-				KType:      5,
+				KType:      core.TypeZSet.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       0,

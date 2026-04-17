@@ -88,7 +88,7 @@ func (d *DB) Delete(key string, fields ...string) (int, error) {
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
 			Select("id").
-			Where("kdb = ? AND kname = ? AND ktype = 4", d.dbIdx, key).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeHash.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -127,7 +127,7 @@ func (d *DB) Exists(key, field string) (bool, error) {
 		Count int64
 	}
 	err := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rhash.kfield = ?", d.dbIdx, key, field).
 		Scopes(store.NotExpired(now)).
 		Count(&result.Count).Error
@@ -140,7 +140,7 @@ func (d *DB) Fields(key string) ([]string, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RHash
 	err := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Find(&results).Error
@@ -162,7 +162,7 @@ func (d *DB) Get(key, field string) (core.Value, error) {
 		Value []byte
 	}
 	err := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rhash.kfield = ?", d.dbIdx, key, field).
 		Scopes(store.NotExpired(now)).
 		Select("rhash.kval as value").
@@ -186,7 +186,7 @@ func (d *DB) GetMany(key string, fields ...string) (map[string]core.Value, error
 	now := time.Now().UnixMilli()
 	var results []store.RHash
 	err := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rhash.kfield IN ?", d.dbIdx, key, fields).
 		Scopes(store.NotExpired(now)).
 		Find(&results).Error
@@ -217,7 +217,7 @@ func (d *DB) Incr(key, field string, delta int) (int, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      4,
+				KType:      core.TypeHash.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -236,7 +236,7 @@ func (d *DB) Incr(key, field string, delta int) (int, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 4:
+		case rkey.KType != core.TypeHash.Value():
 			return core.ErrKeyType
 
 		default:
@@ -301,7 +301,7 @@ func (d *DB) IncrFloat(key, field string, delta float64) (float64, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      4,
+				KType:      core.TypeHash.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -320,7 +320,7 @@ func (d *DB) IncrFloat(key, field string, delta float64) (float64, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 4:
+		case rkey.KType != core.TypeHash.Value():
 			return core.ErrKeyType
 
 		default:
@@ -377,7 +377,7 @@ func (d *DB) Len(key string) (int, error) {
 		Count int64
 	}
 	err := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Count(&result.Count).Error
@@ -390,7 +390,7 @@ func (d *DB) Random(key string) (HashItem, error) {
 	now := time.Now().UnixMilli()
 	var rhash store.RHash
 	err := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Order("RANDOM()").
@@ -411,7 +411,7 @@ func (d *DB) RandFields(key string, count int) ([]HashItem, error) {
 	var results []store.RHash
 
 	query := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now))
 
@@ -452,7 +452,7 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 
 	// Use database-level pagination with cursor-based approach
 	query := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Order("rhash.id ASC"). // Ensure consistent ordering
@@ -585,7 +585,7 @@ func (d *DB) Set(key, field string, value any) (bool, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      4,
+				KType:      core.TypeHash.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -607,7 +607,7 @@ func (d *DB) Set(key, field string, value any) (bool, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 4:
+		case rkey.KType != core.TypeHash.Value():
 			return core.ErrKeyType
 
 		default:
@@ -683,7 +683,7 @@ func (d *DB) SetMany(key string, items map[string]any) (int, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      4,
+				KType:      core.TypeHash.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       0,
@@ -695,7 +695,7 @@ func (d *DB) SetMany(key string, items map[string]any) (int, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 4:
+		case rkey.KType != core.TypeHash.Value():
 			return core.ErrKeyType
 		}
 
@@ -769,7 +769,7 @@ func (d *DB) StrLen(key, field string) (int, error) {
 		Len int
 	}
 	err := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rhash.kfield = ?", d.dbIdx, key, field).
 		Scopes(store.NotExpired(now)).
 		Select("LENGTH(rhash.kval) as len").
@@ -789,7 +789,7 @@ func (d *DB) Values(key string) ([]core.Value, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RHash
 	err := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Find(&results).Error
@@ -809,7 +809,7 @@ func (d *DB) Items(key string) (map[string]core.Value, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RHash
 	err := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Find(&results).Error
@@ -830,7 +830,7 @@ func (d *DB) RandField(key string, count int, withValues bool) ([]HashItem, erro
 	var results []store.RHash
 
 	query := d.store.DB.Model(&store.RHash{}).
-		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = 4").
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Order("RANDOM()")
@@ -881,7 +881,7 @@ func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      4,
+				KType:      core.TypeHash.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -903,7 +903,7 @@ func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 4:
+		case rkey.KType != core.TypeHash.Value():
 			return core.ErrKeyType
 
 		default:

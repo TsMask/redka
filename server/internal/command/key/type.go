@@ -32,6 +32,6 @@ func (cmd Type) Run(w redis.Writer, red redis.Redka) (any, error) {
 		w.WriteError(cmd.Error(err))
 		return nil, err
 	}
-	w.WriteString(k.TypeName())
-	return k.TypeName(), nil
+	w.WriteString(k.Type.Name())
+	return k.Type.Name(), nil
 }

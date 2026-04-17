@@ -68,7 +68,7 @@ func (d *DB) Get(key string) (core.Value, error) {
 		return core.Value{}, core.ErrNotFound
 	}
 
-	if rkey.KType != 1 {
+	if rkey.KType != core.TypeString.Value() {
 		return core.Value{}, core.ErrKeyType
 	}
 
@@ -100,7 +100,7 @@ func (d *DB) GetMany(keys ...string) (map[string]core.Value, error) {
 		Value   []byte
 	}
 	err := d.store.DB.Model(&store.RString{}).
-		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = 1").
+		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = ?", core.TypeString.Value()).
 		Where("rkey.kdb = ? AND rkey.kname IN ?", d.dbIdx, keys).
 		Scopes(store.NotExpired(now)).
 		Select("rkey.kname as key_name, rstring.kval as value").
@@ -136,7 +136,7 @@ func (d *DB) Incr(key string, delta int) (int, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      1,
+				KType:      core.TypeString.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -155,7 +155,7 @@ func (d *DB) Incr(key string, delta int) (int, error) {
 			return err
 		}
 
-		if rkey.KType != 1 {
+		if rkey.KType != core.TypeString.Value() {
 			return core.ErrKeyType
 		}
 
@@ -219,7 +219,7 @@ func (d *DB) IncrFloat(key string, delta float64) (float64, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      1,
+				KType:      core.TypeString.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -238,7 +238,7 @@ func (d *DB) IncrFloat(key string, delta float64) (float64, error) {
 			return err
 		}
 
-		if rkey.KType != 1 {
+		if rkey.KType != core.TypeString.Value() {
 			return core.ErrKeyType
 		}
 
@@ -306,7 +306,7 @@ func (d *DB) Set(key string, value any) error {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      1,
+				KType:      core.TypeString.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -323,7 +323,7 @@ func (d *DB) Set(key string, value any) error {
 		case err != nil:
 			return err
 
-		case rkey.KType != 1:
+		case rkey.KType != core.TypeString.Value():
 			return core.ErrKeyType
 
 		default:
@@ -377,7 +377,7 @@ func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      1,
+				KType:      core.TypeString.Value(),
 				KVer:       1,
 				ExpireAt:   expireAt,
 				ModifiedAt: now,
@@ -400,7 +400,7 @@ func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
 					return err
 				}
 				// Update the existing key
-				if rkey.KType != 1 {
+				if rkey.KType != core.TypeString.Value() {
 					return core.ErrKeyType
 				}
 			}
@@ -428,7 +428,7 @@ func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
 		case err != nil:
 			return err
 
-		case rkey.KType != 1:
+		case rkey.KType != core.TypeString.Value():
 			return core.ErrKeyType
 
 		default:
@@ -498,7 +498,7 @@ func (d *DB) SetMany(items map[string]any) error {
 		var newKeyNames []string
 		for k := range items {
 			if ek, ok := existingMap[k]; ok {
-				if ek.KType != 1 {
+				if ek.KType != core.TypeString.Value() {
 					return core.ErrKeyType
 				}
 				existingKeyNames = append(existingKeyNames, k)
@@ -542,7 +542,7 @@ func (d *DB) SetMany(items map[string]any) error {
 				rkeys = append(rkeys, store.RKey{
 					KDB:        d.dbIdx,
 					KName:      k,
-					KType:      1,
+					KType:      core.TypeString.Value(),
 					KVer:       1,
 					ExpireAt:   nil,
 					ModifiedAt: now,
@@ -784,7 +784,7 @@ func (d *DB) SetNXWithTTL(key string, value any, ttl time.Duration) (bool, error
 			First(&rkey).Error
 
 		if err == nil {
-			if rkey.KType != 1 {
+			if rkey.KType != core.TypeString.Value() {
 				return core.ErrKeyType
 			}
 			return nil
@@ -796,7 +796,7 @@ func (d *DB) SetNXWithTTL(key string, value any, ttl time.Duration) (bool, error
 		rkey = store.RKey{
 			KDB:        d.dbIdx,
 			KName:      key,
-			KType:      1,
+			KType:      core.TypeString.Value(),
 			KVer:       1,
 			ExpireAt:   expireAt,
 			ModifiedAt: now,
@@ -861,7 +861,7 @@ func (d *DB) SetXXWithTTL(key string, value any, ttl time.Duration) (bool, error
 			return err
 		}
 
-		if rkey.KType != 1 {
+		if rkey.KType != core.TypeString.Value() {
 			return core.ErrKeyType
 		}
 
@@ -917,7 +917,7 @@ func (d *DB) SetNXGet(key string, value any, ttl time.Duration) (core.Value, boo
 			First(&rkey).Error
 
 		if err == nil {
-			if rkey.KType != 1 {
+			if rkey.KType != core.TypeString.Value() {
 				return core.ErrKeyType
 			}
 
@@ -942,7 +942,7 @@ func (d *DB) SetNXGet(key string, value any, ttl time.Duration) (core.Value, boo
 		rkey = store.RKey{
 			KDB:        d.dbIdx,
 			KName:      key,
-			KType:      1,
+			KType:      core.TypeString.Value(),
 			KVer:       1,
 			ExpireAt:   expireAt,
 			ModifiedAt: now,
@@ -999,7 +999,7 @@ func (d *DB) SetXXGet(key string, value any, ttl time.Duration) (core.Value, boo
 			return err
 		}
 
-		if rkey.KType != 1 {
+		if rkey.KType != core.TypeString.Value() {
 			return core.ErrKeyType
 		}
 
@@ -1052,7 +1052,7 @@ func (d *DB) SetGet(key string, value any) (core.Value, error) {
 			First(&rkey).Error
 
 		if err == nil {
-			if rkey.KType != 1 {
+			if rkey.KType != core.TypeString.Value() {
 				return core.ErrKeyType
 			}
 
@@ -1088,7 +1088,7 @@ func (d *DB) SetGet(key string, value any) (core.Value, error) {
 		rkey = store.RKey{
 			KDB:        d.dbIdx,
 			KName:      key,
-			KType:      1,
+			KType:      core.TypeString.Value(),
 			KVer:       1,
 			ModifiedAt: now,
 			KLen:       1,
@@ -1130,7 +1130,7 @@ func (d *DB) SetKeepTTL(key string, value any) (bool, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      1,
+				KType:      core.TypeString.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -1154,7 +1154,7 @@ func (d *DB) SetKeepTTL(key string, value any) (bool, error) {
 			return err
 		}
 
-		if rkey.KType != 1 {
+		if rkey.KType != core.TypeString.Value() {
 			return core.ErrKeyType
 		}
 
@@ -1191,7 +1191,7 @@ func (d *DB) StrLen(key string) (int, error) {
 		Len int
 	}
 	err := d.store.DB.Model(&store.RString{}).
-		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = 1").
+		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = ?", core.TypeString.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Select("LENGTH(rstring.kval) as len").
@@ -1224,7 +1224,7 @@ func (d *DB) Append(key string, value []byte) (int, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      1,
+				KType:      core.TypeString.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -1246,7 +1246,7 @@ func (d *DB) Append(key string, value []byte) (int, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 1:
+		case rkey.KType != core.TypeString.Value():
 			return core.ErrKeyType
 
 		default:
@@ -1308,7 +1308,7 @@ func (d *DB) SetRange(key string, offset int, value []byte) (int, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      1,
+				KType:      core.TypeString.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       1,
@@ -1333,7 +1333,7 @@ func (d *DB) SetRange(key string, offset int, value []byte) (int, error) {
 		case err != nil:
 			return err
 
-		case rkey.KType != 1:
+		case rkey.KType != core.TypeString.Value():
 			return core.ErrKeyType
 
 		default:
@@ -1392,7 +1392,7 @@ func (d *DB) GetRange(key string, start, end int) (core.Value, error) {
 		Value []byte
 	}
 	err := d.store.DB.Model(&store.RString{}).
-		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = 1").
+		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = ?", core.TypeString.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Select("rstring.kval as value").

@@ -24,9 +24,6 @@ type ScanResult struct {
 // of set items per page when scanning.
 const scanPageSize = 10
 
-// keyTypeSet is the type ID for set keys.
-const keyTypeSet = 3
-
 // DB is a database-backed set repository.
 // A set is an unordered collection of unique strings.
 // Use the set repository to work with individual sets
@@ -93,7 +90,7 @@ func (d *DB) Add(key string, elems ...any) (int, error) {
 			First(&rkey).Error
 		switch {
 		case err == nil:
-			if rkey.KType != keyTypeSet {
+			if rkey.KType != core.TypeSet.Value() {
 				return core.ErrKeyType
 			}
 			if err := tx.Model(&rkey).Updates(map[string]interface{}{
@@ -106,7 +103,7 @@ func (d *DB) Add(key string, elems ...any) (int, error) {
 			rkey = store.RKey{
 				KDB:        d.dbIdx,
 				KName:      key,
-				KType:      keyTypeSet,
+				KType:      core.TypeSet.Value(),
 				KVer:       1,
 				ModifiedAt: now,
 				KLen:       0,
@@ -175,7 +172,7 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, keyTypeSet).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeSet.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			n = 0
@@ -223,7 +220,7 @@ func (d *DB) diffTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	var results []store.RSet
 
 	err := db.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, keys[0]).
 		Scopes(store.NotExpired(now)).
 		Find(&results).Error
@@ -243,7 +240,7 @@ func (d *DB) diffTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	for _, key := range keys[1:] {
 		var results []store.RSet
 		err := db.Model(&store.RSet{}).
-			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
 			Find(&results).Error
@@ -283,7 +280,7 @@ func (d *DB) DiffStore(dest string, keys ...string) (int, error) {
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
 			First(&rkey).Error
-		if err == nil && rkey.KType != keyTypeSet {
+		if err == nil && rkey.KType != core.TypeSet.Value() {
 			return core.ErrKeyType
 		}
 
@@ -299,7 +296,7 @@ func (d *DB) DiffStore(dest string, keys ...string) (int, error) {
 		rkey = store.RKey{
 			KDB:        d.dbIdx,
 			KName:      dest,
-			KType:      keyTypeSet,
+			KType:      core.TypeSet.Value(),
 			KVer:       1,
 			ModifiedAt: now,
 			KLen:       len(items),
@@ -335,7 +332,7 @@ func (d *DB) Exists(key string, elem any) (bool, error) {
 		Count int64
 	}
 	err = d.store.DB.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rset.elem = ?", d.dbIdx, key, elemb).
 		Scopes(store.NotExpired(now)).
 		Count(&result.Count).Error
@@ -359,7 +356,7 @@ func (d *DB) interTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 
 	var results []store.RSet
 	err := db.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, keys[0]).
 		Scopes(store.NotExpired(now)).
 		Find(&results).Error
@@ -379,7 +376,7 @@ func (d *DB) interTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	for _, key := range keys[1:] {
 		var results []store.RSet
 		err := db.Model(&store.RSet{}).
-			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
 			Find(&results).Error
@@ -427,7 +424,7 @@ func (d *DB) InterStore(dest string, keys ...string) (int, error) {
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
 			First(&rkey).Error
-		if err == nil && rkey.KType != keyTypeSet {
+		if err == nil && rkey.KType != core.TypeSet.Value() {
 			return core.ErrKeyType
 		}
 
@@ -443,7 +440,7 @@ func (d *DB) InterStore(dest string, keys ...string) (int, error) {
 		rkey = store.RKey{
 			KDB:        d.dbIdx,
 			KName:      dest,
-			KType:      keyTypeSet,
+			KType:      core.TypeSet.Value(),
 			KVer:       1,
 			ModifiedAt: now,
 			KLen:       len(items),
@@ -494,7 +491,7 @@ func (d *DB) ExistsMany(key string, members ...any) ([]bool, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RSet
 	err = d.store.DB.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rset.elem IN ?", d.dbIdx, key, elembs).
 		Scopes(store.NotExpired(now)).
 		Find(&results).Error
@@ -520,7 +517,7 @@ func (d *DB) Items(key string) ([]core.Value, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RSet
 	err := d.store.DB.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Find(&results).Error
@@ -542,7 +539,7 @@ func (d *DB) Len(key string) (int, error) {
 		Count int64
 	}
 	err := d.store.DB.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Count(&result.Count).Error
@@ -586,7 +583,7 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 			if err != nil {
 				return err
 			}
-			if firstKeyRecord.KType != keyTypeSet {
+			if firstKeyRecord.KType != core.TypeSet.Value() {
 				return core.ErrKeyType
 			}
 			srcKey = firstKeyRecord
@@ -599,7 +596,7 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 				destKey = store.RKey{
 					KDB:        d.dbIdx,
 					KName:      dest,
-					KType:      keyTypeSet,
+					KType:      core.TypeSet.Value(),
 					KVer:       1,
 					ModifiedAt: now,
 					KLen:       0,
@@ -609,7 +606,7 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 				}
 			} else if err != nil {
 				return err
-			} else if destKey.KType != keyTypeSet {
+			} else if destKey.KType != core.TypeSet.Value() {
 				return core.ErrKeyType
 			}
 		} else {
@@ -619,7 +616,7 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 				destKey = store.RKey{
 					KDB:        d.dbIdx,
 					KName:      dest,
-					KType:      keyTypeSet,
+					KType:      core.TypeSet.Value(),
 					KVer:       1,
 					ModifiedAt: now,
 					KLen:       0,
@@ -629,14 +626,14 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 				}
 			} else if err != nil {
 				return err
-			} else if destKey.KType != keyTypeSet {
+			} else if destKey.KType != core.TypeSet.Value() {
 				return core.ErrKeyType
 			}
 			destKey = firstKeyRecord
 
 			// 检查 src 是否存在
 			err = tx.Model(&store.RKey{}).
-				Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, secondKey, keyTypeSet).
+				Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, secondKey, core.TypeSet.Value()).
 				First(&srcKey).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return core.ErrNotFound
@@ -715,7 +712,7 @@ func (d *DB) Pop(key string) (core.Value, error) {
 
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, keyTypeSet).
+			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeSet.Value()).
 			First(&rkey).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
@@ -756,7 +753,7 @@ func (d *DB) Random(key string) (core.Value, error) {
 	now := time.Now().UnixMilli()
 	var rset store.RSet
 	err := d.store.DB.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Order("RANDOM()").
@@ -777,7 +774,7 @@ func (d *DB) RandMember(key string, count int) ([]core.Value, error) {
 	var rsets []store.RSet
 
 	query := d.store.DB.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now))
 
@@ -818,7 +815,7 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 
 	// Use database-level pagination with cursor-based approach
 	query := d.store.DB.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		Order("rset.id ASC"). // Ensure consistent ordering
@@ -948,7 +945,7 @@ func (d *DB) unionTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	for _, key := range keys {
 		var results []store.RSet
 		err := db.Model(&store.RSet{}).
-			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", keyTypeSet).
+			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 			Scopes(store.NotExpired(now)).
 			Find(&results).Error
@@ -988,7 +985,7 @@ func (d *DB) UnionStore(dest string, keys ...string) (int, error) {
 		err = tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
 			First(&rkey).Error
-		if err == nil && rkey.KType != keyTypeSet {
+		if err == nil && rkey.KType != core.TypeSet.Value() {
 			return core.ErrKeyType
 		}
 
@@ -1004,7 +1001,7 @@ func (d *DB) UnionStore(dest string, keys ...string) (int, error) {
 		rkey = store.RKey{
 			KDB:        d.dbIdx,
 			KName:      dest,
-			KType:      keyTypeSet,
+			KType:      core.TypeSet.Value(),
 			KVer:       1,
 			ModifiedAt: now,
 			KLen:       len(items),
