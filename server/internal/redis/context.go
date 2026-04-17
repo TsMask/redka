@@ -109,6 +109,10 @@ func (w *ConnWriter) WriteBulkString(bulk string) {
 
 // WriteError writes an error message to the client.
 func (w *ConnWriter) WriteError(msg string) {
+	// Record error stat before writing
+	if stats := GetRuntimeStats(w); stats != nil {
+		stats.OnError(msg)
+	}
 	w.conn.WriteError(msg)
 }
 

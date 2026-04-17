@@ -73,7 +73,7 @@ func (c Info) buildInfo(sections []string, w redis.Writer, red redis.Redka) stri
 		case "cluster":
 			parts = append(parts, c.infoCluster())
 		case "errorstats":
-			parts = append(parts, c.infoErrorStats())
+			parts = append(parts, c.infoErrorStats(snap))
 		case "keyspace":
 			parts = append(parts, c.infoKeyspace(w, red))
 		}
@@ -344,8 +344,13 @@ func (c Info) infoCluster() string {
 	return "# Cluster\r\ncluster_enabled:0"
 }
 
-func (c Info) infoErrorStats() string {
-	return "# Errorstats"
+func (c Info) infoErrorStats(snap redis.RuntimeSnapshot) string {
+	var lines []string
+	lines = append(lines, "# Errorstats")
+	for errType, count := range snap.ErrorStats {
+		lines = append(lines, fmt.Sprintf("errorstat_%s:count=%d", errType, count))
+	}
+	return strings.Join(lines, "\r\n")
 }
 
 func (c Info) infoKeyspace(w redis.Writer, red redis.Redka) string {

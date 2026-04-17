@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -32,6 +34,10 @@ type RuntimeStats struct {
 	keyspaceHits   atomic.Int64
 	keyspaceMisses atomic.Int64
 	evictedKeys    atomic.Int64
+
+	// Error stats: error type -> count
+	errorStats     map[string]int64
+	errorStatsMu   sync.RWMutex
 }
 
 // RuntimeSnapshot is a point-in-time view of runtime counters.
@@ -52,6 +58,7 @@ type RuntimeSnapshot struct {
 	EvictedKeys              int64
 	LruClock                 int64
 	ServerTimeUsec           int64
+	ErrorStats               map[string]int64
 }
 
 // NewRuntimeStats creates an initialized runtime stats container.
@@ -59,6 +66,7 @@ func NewRuntimeStats(startedAt time.Time, runID string) *RuntimeStats {
 	stats := &RuntimeStats{
 		startedAtUnix: startedAt.Unix(),
 		runID:         runID,
+		errorStats:    make(map[string]int64),
 	}
 	stats.opsSecond.Store(startedAt.Unix())
 	return stats
@@ -139,6 +147,7 @@ func (s *RuntimeStats) Snapshot(now time.Time) RuntimeSnapshot {
 		EvictedKeys:              s.evictedKeys.Load(),
 		LruClock:                 int64(now.Unix() % (1 << 31)),
 		ServerTimeUsec:           now.UnixNano() / 1000,
+		ErrorStats:               s.GetErrorStats(),
 	}
 }
 
@@ -175,4 +184,33 @@ func (s *RuntimeStats) OnKeyspaceMiss() {
 // OnEvictedKey increments the evicted keys counter.
 func (s *RuntimeStats) OnEvictedKey() {
 	s.evictedKeys.Add(1)
+}
+
+// OnError records an error occurrence for errorstats.
+func (s *RuntimeStats) OnError(errMsg string) {
+	if errMsg == "" {
+		return
+	}
+	// Extract error type prefix (e.g., "ERR" from "ERR something")
+	parts := strings.SplitN(errMsg, " ", 2)
+	errType := parts[0]
+	if errType == "" {
+		return
+	}
+
+	s.errorStatsMu.Lock()
+	s.errorStats[errType]++
+	s.errorStatsMu.Unlock()
+}
+
+// GetErrorStats returns a copy of error statistics.
+func (s *RuntimeStats) GetErrorStats() map[string]int64 {
+	s.errorStatsMu.RLock()
+	defer s.errorStatsMu.RUnlock()
+
+	result := make(map[string]int64, len(s.errorStats))
+	for k, v := range s.errorStats {
+		result[k] = v
+	}
+	return result
 }
