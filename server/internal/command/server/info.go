@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/tsmask/redka/config"
 	"github.com/tsmask/redka/internal/store"
 	"github.com/tsmask/redka/server/internal/parser"
@@ -61,7 +62,7 @@ func (c Info) buildInfo(sections []string, w redis.Writer, red redis.Redka) stri
 		case "memory":
 			parts = append(parts, c.infoMemory(snap))
 		case "persistence":
-			parts = append(parts, c.infoPersistence(snap))
+			parts = append(parts, c.infoPersistence())
 		case "stats":
 			parts = append(parts, c.infoStats(snap))
 		case "replication":
@@ -268,7 +269,7 @@ func (c Info) infoMemory(snap redis.RuntimeSnapshot) string {
 	return strings.Join(lines, "\r\n")
 }
 
-func (c Info) infoPersistence(snap redis.RuntimeSnapshot) string {
+func (c Info) infoPersistence() string {
 	var lines []string
 	lines = append(lines, "# Persistence")
 	lines = append(lines, "loading:0")
@@ -386,14 +387,25 @@ func (c Info) infoReplication() string {
 }
 
 func (c Info) infoCPU() string {
+	var User float64   // user CPU time in seconds
+	var System float64 // system CPU time in seconds
+
+	pid := int32(os.Getpid())
+	if p, err := process.NewProcess(pid); err == nil {
+		if times, err := p.Times(); err == nil {
+			User = times.User
+			System = times.System
+		}
+	}
+
 	var lines []string
 	lines = append(lines, "# CPU")
-	lines = append(lines, "used_cpu_sys:0.000000")
-	lines = append(lines, "used_cpu_user:0.000000")
+	lines = append(lines, fmt.Sprintf("used_cpu_sys:%.6f", System))
+	lines = append(lines, fmt.Sprintf("used_cpu_user:%.6f", User))
 	lines = append(lines, "used_cpu_sys_children:0.000000")
 	lines = append(lines, "used_cpu_user_children:0.000000")
-	lines = append(lines, "used_cpu_sys_main_thread:0.000000")
-	lines = append(lines, "used_cpu_user_main_thread:0.000000")
+	lines = append(lines, fmt.Sprintf("used_cpu_sys_main_thread:%.6f", System))
+	lines = append(lines, fmt.Sprintf("used_cpu_user_main_thread:%.6f", User))
 	return strings.Join(lines, "\r\n")
 }
 
@@ -564,11 +576,4 @@ func percentage(a, b uint64) string {
 		return "0.00%"
 	}
 	return strconv.FormatFloat(float64(a)/float64(b)*100, 'f', 2, 64) + "%"
-}
-
-func ratio(a, b uint64) string {
-	if b == 0 {
-		return "0.00"
-	}
-	return strconv.FormatFloat(float64(a)/float64(b), 'f', 2, 64)
 }
