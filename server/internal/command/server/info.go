@@ -58,7 +58,7 @@ func (c Info) buildInfo(sections []string, w redis.Writer, red redis.Redka) stri
 		case "server":
 			parts = append(parts, c.infoServer(w, snap))
 		case "clients":
-			parts = append(parts, c.infoClients(snap))
+			parts = append(parts, c.infoClients(w, snap))
 		case "memory":
 			parts = append(parts, c.infoMemory(snap))
 		case "persistence":
@@ -140,12 +140,18 @@ func (c Info) infoServer(w redis.Writer, snap redis.RuntimeSnapshot) string {
 	return strings.Join(lines, "\r\n")
 }
 
-func (c Info) infoClients(snap redis.RuntimeSnapshot) string {
+func (c Info) infoClients(w redis.Writer, snap redis.RuntimeSnapshot) string {
+	cfg := redis.GetConfig(w)
+	maxclients := 10000
+	if cfg != nil && cfg.MaxClients > 0 {
+		maxclients = cfg.MaxClients
+	}
+
 	var lines []string
 	lines = append(lines, "# Clients")
 	lines = append(lines, "connected_clients:"+strconv.FormatInt(snap.ConnectedClients, 10))
 	lines = append(lines, "cluster_connections:0")
-	lines = append(lines, "maxclients:10000")
+	lines = append(lines, "maxclients:"+strconv.Itoa(maxclients))
 	lines = append(lines, "client_recent_max_input_buffer:0")
 	lines = append(lines, "client_recent_max_output_buffer:0")
 	lines = append(lines, "blocked_clients:0")

@@ -28,8 +28,9 @@ type ServerConfig struct {
 	DBDSN string `yaml:"db_dsn"` // Database connection string
 
 	// Authentication settings
-	Password  string `yaml:"password"`  // Redka server authentication password
-	Databases int    `yaml:"databases"` // Number of databases (default: 16)
+	Password   string `yaml:"password"`    // Redka server authentication password
+	Databases  int    `yaml:"databases"`   // Number of databases (default: 16)
+	MaxClients int    `yaml:"max_clients"` // Max client connections (default: 10000)
 
 	// Slow log settings
 	SlowlogMaxLen    int `yaml:"slowlog_max_len"`   // Max slowlog entries (default: 128)
@@ -51,10 +52,11 @@ func DefaultConfig() *ServerConfig {
 		Sock:             "",
 		DBDSN:            ":memory:", // Default to SQLite memory
 		Password:         "",
-		Databases:        16,   // Redis default
-		SlowlogMaxLen:    128,  // Redis default
-		SlowlogThreshold: 1500, // 1500ms
-		CleanupInterval:  10,   // 10 seconds (similar to Redis expiration check)
+		Databases:        16,    // Redis default
+		MaxClients:       10000, // Redis default
+		SlowlogMaxLen:    128,   // Redis default
+		SlowlogThreshold: 1500,  // 1500ms
+		CleanupInterval:  10,    // 10 seconds (similar to Redis expiration check)
 		Verbose:          false,
 		LogFile:          "",
 	}

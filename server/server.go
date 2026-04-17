@@ -49,6 +49,13 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 	handler := createHandlers(db, clientRegistry, slowLog)
 
 	accept := func(conn redcon.Conn) bool {
+		// Check max clients limit
+		if cfg.MaxClients > 0 && clientRegistry.Count() >= cfg.MaxClients {
+			runtimeStats.OnRejectedConnection()
+			slog.Warn("rejected connection: max clients reached", "client", conn.RemoteAddr(), "max", cfg.MaxClients)
+			return false
+		}
+
 		// Initialize connection context map with config
 		ctx := make(map[string]any)
 		ctx[redis.CtxKeyConfig] = cfg
