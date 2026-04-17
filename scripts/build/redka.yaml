@@ -15,7 +15,7 @@ sock: ""              # Unix socket 路径（如果设置，将覆盖 host 和 p
 
 # --- SQLite 示例 ---
 # 支持多种格式：file:, sqlite:, sqlite3: 或直接文件路径
-db_dsn: "sqlite:/usr/local/etc/redka/redka.sqlite?vfs=memdb"
+db_dsn: ":memory:"
 # db_dsn: "sqlite:/tmp/redka.sqlite?vfs=memdb" # 内存模式不生成文件
 # db_dsn: "sqlite3:/tmp/redka.sqlite"
 # db_dsn: "/tmp/redka.sqlite"  # 直接文件路径也会被识别为 SQLite
@@ -33,13 +33,13 @@ db_dsn: "sqlite:/usr/local/etc/redka/redka.sqlite?vfs=memdb"
 # 安全设置
 # ===========================================
 password: ""          # 认证密码（留空表示不需要认证）
-databases: 16        # 逻辑数据库数量（默认：16，Redis默认）
+databases: 16         # 逻辑数据库数量（默认：16，Redis默认）
 
 # ===========================================
 # 慢查询日志设置
 # ===========================================
 slowlog_max_len: 128      # 慢查询日志最大条目数（默认：128）
-slowlog_threshold: 10000  # 慢查询阈值（微秒），默认10000µs=10ms
+slowlog_threshold: 1500   # 慢查询阈值（毫秒），默认1500ms
 
 # ===========================================
 # 清理设置
@@ -50,4 +50,4 @@ cleanup_interval: 10  # 过期key清理间隔（秒），默认10秒（类似Red
 # 日志设置
 # ===========================================
 verbose: false        # 是否启用详细日志
-log_file: "/usr/local/etc/redka/redka.log"          # 日志文件路径（留空表示输出到 stdout）
+log_file: ""          # 日志文件路径（留空表示输出到 stdout）

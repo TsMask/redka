@@ -33,7 +33,7 @@ type ServerConfig struct {
 
 	// Slow log settings
 	SlowlogMaxLen    int `yaml:"slowlog_max_len"`   // Max slowlog entries (default: 128)
-	SlowlogThreshold int `yaml:"slowlog_threshold"` // Threshold in µs (default: 10000 = 10ms)
+	SlowlogThreshold int `yaml:"slowlog_threshold"` // Threshold in ms (default: 1500)
 
 	// Cleanup settings
 	CleanupInterval int `yaml:"cleanup_interval"` // Cleanup interval in seconds (default: 10)
@@ -49,14 +49,14 @@ func DefaultConfig() *ServerConfig {
 		Host:             "0.0.0.0",
 		Port:             6379,
 		Sock:             "",
-		DBDSN:            "file:/tmp/redka.sqlite?vfs=memdb", // Default to SQLite memory
+		DBDSN:            ":memory:", // Default to SQLite memory
 		Password:         "",
-		Databases:        16,    // Redis default
-		SlowlogMaxLen:    128,   // Redis default
-		SlowlogThreshold: 10000, // 10ms in µs (Redis default)
-		CleanupInterval:  10,    // 10 seconds (similar to Redis expiration check)
+		Databases:        16,   // Redis default
+		SlowlogMaxLen:    128,  // Redis default
+		SlowlogThreshold: 1500, // 1500ms
+		CleanupInterval:  10,   // 10 seconds (similar to Redis expiration check)
 		Verbose:          false,
-		LogFile:          "/tmp/redka.log",
+		LogFile:          "",
 	}
 }
 

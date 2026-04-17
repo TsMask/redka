@@ -7,15 +7,15 @@ ARG DATE=unknown
 WORKDIR /redka
 
 COPY . .
-RUN apk add gcc musl-dev
 RUN go mod download
 
 # Build the application
-RUN CGO_ENABLED=1 go build \
-    -ldflags "-s -w -X github.com/tsmask/redka/config.Version=${VERSION} -X github.com/tsmask/redka/config.Commit=${COMMIT} -X github.com/tsmask/redka/config.Date=${DATE}" \
-    -trimpath \
-    -o redka \
-    main.go
+RUN go build \
+    -ldflags "-s -w \
+       	-X github.com/tsmask/redka/config.Version=${VERSION} \
+       	-X github.com/tsmask/redka/config.Commit=${COMMIT} \
+       	-X github.com/tsmask/redka/config.Date=${DATE}" \
+    -trimpath -o redka main.go
 
 # Final stage
 FROM alpine:3.21 AS runtime

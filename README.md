@@ -128,10 +128,10 @@ bash ./scripts/test/test_set_commands.sh 6380 localhost password
 
 ```bash
 # 打包 Deb 包
-./scripts/build-deb.sh
+./scripts/build/build-deb.sh
 
 # 打包 RPM 包
-./scripts/build-rpm.sh
+./scripts/build/build-rpm.sh
 
 # 普通二进制
 make build

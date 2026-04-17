@@ -1,0 +1,35 @@
+[Unit]
+Description=Redka Database Service
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/bin/redka
+
+[Service]
+Type=simple
+WorkingDirectory=/usr/local/etc/redka
+
+ExecStart=/usr/local/bin/redka -c /usr/local/etc/redka/redka.yaml
+
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+MemoryMax=2G
+MemoryHigh=1.5G
+
+CPUQuota=80%
+Nice=10
+
+LimitNOFILE=65536
+LimitNPROC=4096
+
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=redka
+
+[Install]
+WantedBy=multi-user.target

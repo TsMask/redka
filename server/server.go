@@ -43,8 +43,8 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 		cfg = config.DefaultConfig()
 	}
 
-	// Create slowlog with config values (threshold in µs → Duration)
-	slowLog := slowlog.New(cfg.SlowlogMaxLen, time.Duration(cfg.SlowlogThreshold)*time.Microsecond)
+	// Create slowlog with config values (threshold in ms → Duration)
+	slowLog := slowlog.New(cfg.SlowlogMaxLen, time.Duration(cfg.SlowlogThreshold)*time.Millisecond)
 
 	handler := createHandlers(db, clientRegistry, slowLog)
 

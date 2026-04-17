@@ -34,8 +34,8 @@ mkdir -p "${DEST_DIR}/BUILD/usr/local/etc/redka"
 mkdir -p "${DEST_DIR}/BUILD/etc/systemd/system"
 
 install -m 755 "${PROJECT_DIR}/redka" "${DEST_DIR}/BUILD/usr/local/bin/redka"
-install -m 644 "${SCRIPTS_DIR}/redka.yaml" "${DEST_DIR}/BUILD/usr/local/etc/redka/redka.example.yaml"
-install -m 644 "${SCRIPTS_DIR}/redka.service" "${DEST_DIR}/BUILD/etc/systemd/system/redka.service"
+install -m 644 "${SCRIPTS_DIR}/build/redka.yaml" "${DEST_DIR}/BUILD/usr/local/etc/redka/redka.example.yaml"
+install -m 644 "${SCRIPTS_DIR}/build/redka.service" "${DEST_DIR}/BUILD/etc/systemd/system/redka.service"
 
 cat > "${DEST_DIR}/SPEC" <<EOF
 Name:           ${PKG_NAME}

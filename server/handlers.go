@@ -104,8 +104,6 @@ func timeout(next redcon.HandlerFunc, timeout time.Duration) redcon.HandlerFunc 
 	}
 }
 
-const slowQueryThreshold = 100 * time.Millisecond
-
 // logging logs the command processing time and marks slow queries.
 func logging(next redcon.HandlerFunc, sl *slowlog.SlowLog) redcon.HandlerFunc {
 	return func(conn redcon.Conn, cmd redcon.Command) {
@@ -113,17 +111,15 @@ func logging(next redcon.HandlerFunc, sl *slowlog.SlowLog) redcon.HandlerFunc {
 		next(conn, cmd)
 		elapsed := time.Since(start)
 
-		if elapsed > slowQueryThreshold {
+		// Push to slow log if exceeds threshold
+		if sl != nil && elapsed >= sl.Threshold() {
 			slog.Warn("slow query detected",
 				"command", string(cmd.Args[0]),
 				"client", conn.RemoteAddr(),
 				"duration", elapsed,
-				"threshold", slowQueryThreshold,
+				"threshold", sl.Threshold(),
 			)
-		}
 
-		// Push to slow log if exceeds threshold
-		if sl != nil && elapsed >= sl.Threshold() {
 			clientName := redis.GetClientName(redis.NewConnWriter(conn))
 			sl.Push(elapsed, cmd.Args, conn.RemoteAddr(), clientName)
 		}
