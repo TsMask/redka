@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tsmask/redka/config"
+	"github.com/tsmask/redka/internal/store"
 	"github.com/tsmask/redka/server/internal/parser"
 	"github.com/tsmask/redka/server/internal/redis"
 )
@@ -351,14 +352,46 @@ func (c Info) infoKeyspace(w redis.Writer, red redis.Redka) string {
 	var lines []string
 	lines = append(lines, "# Keyspace")
 
-	// Report current database
-	dbIdx := redis.GetSelectedDB(w)
-	keyCount, err := red.Key().Len()
-	if err != nil {
-		keyCount = 0
+	cfg := redis.GetConfig(w)
+	dbCount := 16
+	if cfg != nil && cfg.Databases > 0 {
+		dbCount = cfg.Databases
 	}
-	if keyCount > 0 {
-		lines = append(lines, fmt.Sprintf("db%d:keys=%d,expires=0,avg_ttl=0", dbIdx, keyCount))
+
+	s := red.Store()
+	now := time.Now().UnixMilli()
+
+	// Report all databases
+	for dbIdx := 0; dbIdx < dbCount; dbIdx++ {
+		var keyCount, expires int64
+		var ttlSum int64
+
+		// Count total keys in this DB
+		s.DB.Model(&store.RKey{}).Where("kdb = ?", dbIdx).Count(&keyCount)
+		if keyCount == 0 {
+			continue
+		}
+
+		// Count keys with expiration
+		s.DB.Model(&store.RKey{}).
+			Where("kdb = ? AND expire_at IS NOT NULL AND expire_at > ?", dbIdx, now).
+			Count(&expires)
+
+		// Sum TTL for average calculation
+		var expireAts []int64
+		s.DB.Model(&store.RKey{}).
+			Where("kdb = ? AND expire_at IS NOT NULL AND expire_at > ?", dbIdx, now).
+			Pluck("expire_at", &expireAts)
+		for _, t := range expireAts {
+			ttlSum += t - now
+		}
+
+		avgTTL := int64(0)
+		if expires > 0 {
+			avgTTL = ttlSum / expires
+		}
+
+		lines = append(lines, fmt.Sprintf("db%d:keys=%d,expires=%d,avg_ttl=%d", dbIdx, keyCount, expires, avgTTL))
 	}
 
 	if len(lines) == 1 {

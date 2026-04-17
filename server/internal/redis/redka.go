@@ -140,25 +140,32 @@ type RZSet interface {
 // Redka is an abstraction for *redka.DB and *redka.Tx.
 // Used to execute commands in a unified way.
 type Redka struct {
-	hash RHash
-	key  RKey
-	list RList
-	set  RSet
-	str  RStr
-	zset RZSet
+	store *store.Store
+	hash  RHash
+	key   RKey
+	list  RList
+	set   RSet
+	str   RStr
+	zset  RZSet
 }
 
 // NewRedka creates a new Redka instance from a store.Store and database index.
 // This is the primary constructor for simplified architecture.
 func NewRedka(s *store.Store, dbIdx int) Redka {
 	return Redka{
-		hash: rhash.New(s).WithDB(dbIdx),
-		key:  rkey.New(s).WithDB(dbIdx),
-		list: rlist.New(s).WithDB(dbIdx),
-		set:  rset.New(s).WithDB(dbIdx),
-		str:  rstring.New(s).WithDB(dbIdx),
-		zset: rzset.New(s).WithDB(dbIdx),
+		store: s,
+		hash:  rhash.New(s).WithDB(dbIdx),
+		key:   rkey.New(s).WithDB(dbIdx),
+		list:  rlist.New(s).WithDB(dbIdx),
+		set:   rset.New(s).WithDB(dbIdx),
+		str:   rstring.New(s).WithDB(dbIdx),
+		zset:  rzset.New(s).WithDB(dbIdx),
 	}
+}
+
+// Store returns the underlying store.
+func (r Redka) Store() *store.Store {
+	return r.store
 }
 
 // Hash returns the hash repository.
