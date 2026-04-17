@@ -12,7 +12,7 @@ endif
 ifdef git_tag
 build_ver := $(git_tag)
 else
-build_ver := main
+build_ver := 2.0.0
 endif
 
 build_date := $(shell date -u '+%Y-%m-%dT%H:%M:%S')
