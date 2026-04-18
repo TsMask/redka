@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tidwall/redcon"
 	"github.com/tsmask/redka/config"
@@ -38,9 +39,10 @@ const (
 // It provides map-backed context storage so that multiple subsystems
 // (config, state, etc.) can share the connection without type conflicts.
 type ConnWriter struct {
-	conn redcon.Conn
-	ctx  map[string]any
-	mu   sync.RWMutex // Protects concurrent access to ctx
+	conn         redcon.Conn
+	ctx          map[string]any
+	mu           sync.RWMutex // Protects concurrent access to ctx
+	writtenBytes int64        // Track bytes written for network I/O stats
 }
 
 // NewConnWriter creates a ConnWriter from a redcon.Conn.
@@ -87,6 +89,12 @@ func (w *ConnWriter) Conn() redcon.Conn {
 	return w.conn
 }
 
+// WrittenBytes returns the total number of bytes written by Write methods.
+// This is used for network I/O statistics.
+func (w *ConnWriter) WrittenBytes() int64 {
+	return atomic.LoadInt64(&w.writtenBytes)
+}
+
 // WriteAny writes any value to the client.
 func (w *ConnWriter) WriteAny(v any) {
 	w.conn.WriteAny(v)
@@ -100,11 +108,15 @@ func (w *ConnWriter) WriteArray(count int) {
 // WriteBulk writes a bulk byte slice to the client.
 func (w *ConnWriter) WriteBulk(bulk []byte) {
 	w.conn.WriteBulk(bulk)
+	// $+len\r\n + content + \r\n
+	atomic.AddInt64(&w.writtenBytes, int64(len(bulk))+9) // adds bytes to the written counter.
 }
 
 // WriteBulkString writes a bulk string to the client.
 func (w *ConnWriter) WriteBulkString(bulk string) {
 	w.conn.WriteBulkString(bulk)
+	// $+len\r\n + content + \r\n
+	atomic.AddInt64(&w.writtenBytes, int64(len(bulk))+9) // adds bytes to the written counter.
 }
 
 // WriteError writes an error message to the client.
@@ -114,6 +126,8 @@ func (w *ConnWriter) WriteError(msg string) {
 		stats.OnError(msg)
 	}
 	w.conn.WriteError(msg)
+	// - + content + \r\n
+	atomic.AddInt64(&w.writtenBytes, int64(len(msg))+7) // adds bytes to the written counter.
 }
 
 // WriteInt writes an integer to the client.
@@ -134,11 +148,14 @@ func (w *ConnWriter) WriteNull() {
 // WriteRaw writes raw bytes to the client.
 func (w *ConnWriter) WriteRaw(data []byte) {
 	w.conn.WriteRaw(data)
+	atomic.AddInt64(&w.writtenBytes, int64(len(data))) // adds bytes to the written counter.
 }
 
 // WriteString writes a simple string to the client.
 func (w *ConnWriter) WriteString(str string) {
 	w.conn.WriteString(str)
+	// + + content + \r\n
+	atomic.AddInt64(&w.writtenBytes, int64(len(str))+3) // adds bytes to the written counter.
 }
 
 // WriteUint64 writes a uint64 to the client.

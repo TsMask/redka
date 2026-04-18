@@ -209,6 +209,11 @@ func handle(db *store.Store, clientRegistry *redis.ClientRegistry) redcon.Handle
 
 		reqCtx := redis.GetRequestCtx(cw)
 
+		// Track network I/O stats
+		if stats := redis.GetRuntimeStats(cw); stats != nil {
+			stats.AddNetInput(int64(len(cmd.Raw)))
+		}
+
 		// Update client registry with last command
 		if clientID := cw.ConnID(); clientID != 0 {
 			clientRegistry.SetLastCmd(clientID, string(cmd.Args[0]))
@@ -219,6 +224,12 @@ func handle(db *store.Store, clientRegistry *redis.ClientRegistry) redcon.Handle
 		} else {
 			handleSingle(reqCtx, cw, state, db)
 		}
+
+		// Track network output bytes
+		if stats := redis.GetRuntimeStats(cw); stats != nil {
+			stats.AddNetOutput(cw.WrittenBytes())
+		}
+
 		state.clear()
 	}
 }

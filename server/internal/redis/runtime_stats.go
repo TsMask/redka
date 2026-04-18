@@ -26,6 +26,12 @@ type RuntimeStats struct {
 	totalNetInput  atomic.Int64
 	totalNetOutput atomic.Int64
 
+	// Per-second network bytes tracking (for instantaneous_input_kbps/output_kbps)
+	netInputSecond    atomic.Int64
+	netInputInSecond  atomic.Int64
+	netOutputSecond   atomic.Int64
+	netOutputInSecond atomic.Int64
+
 	// Client tracking
 	rejectedConnections atomic.Int64
 
@@ -55,6 +61,8 @@ type RuntimeSnapshot struct {
 	InstantaneousOpsPerSec   int64
 	TotalNetInputBytes       int64
 	TotalNetOutputBytes      int64
+	InstantaneousInputKbps   float64
+	InstantaneousOutputKbps  float64
 	RejectedConnections      int64
 	ExpiredKeys              int64
 	KeyspaceHits             int64
@@ -135,6 +143,17 @@ func (s *RuntimeStats) Snapshot(now time.Time) RuntimeSnapshot {
 		ops = s.opsInSecond.Load()
 	}
 
+	// Instantaneous network bytes per second (kbps = bytes/1024)
+	netInputKbps := 0.0
+	if s.netInputSecond.Load() == now.Unix() {
+		netInputKbps = float64(s.netInputInSecond.Load()) / 1024.0
+	}
+
+	netOutputKbps := 0.0
+	if s.netOutputSecond.Load() == now.Unix() {
+		netOutputKbps = float64(s.netOutputInSecond.Load()) / 1024.0
+	}
+
 	return RuntimeSnapshot{
 		RunID:                    s.runID,
 		UptimeInSeconds:          uptime,
@@ -145,6 +164,8 @@ func (s *RuntimeStats) Snapshot(now time.Time) RuntimeSnapshot {
 		InstantaneousOpsPerSec:   ops,
 		TotalNetInputBytes:       s.totalNetInput.Load(),
 		TotalNetOutputBytes:      s.totalNetOutput.Load(),
+		InstantaneousInputKbps:   netInputKbps,
+		InstantaneousOutputKbps:  netOutputKbps,
 		RejectedConnections:      s.rejectedConnections.Load(),
 		ExpiredKeys:              s.expiredKeys.Load(),
 		KeyspaceHits:             s.keyspaceHits.Load(),
@@ -160,11 +181,47 @@ func (s *RuntimeStats) Snapshot(now time.Time) RuntimeSnapshot {
 // AddNetInput adds bytes to the network input counter.
 func (s *RuntimeStats) AddNetInput(bytes int64) {
 	s.totalNetInput.Add(bytes)
+	sec := time.Now().Unix()
+	for {
+		cur := s.netInputSecond.Load()
+		if cur == sec {
+			s.netInputInSecond.Add(bytes)
+			return
+		}
+		if sec > cur {
+			if s.netInputSecond.CompareAndSwap(cur, sec) {
+				s.netInputInSecond.Store(bytes)
+				return
+			}
+			continue
+		}
+		// Clock skew fallback
+		s.netInputInSecond.Add(bytes)
+		return
+	}
 }
 
 // AddNetOutput adds bytes to the network output counter.
 func (s *RuntimeStats) AddNetOutput(bytes int64) {
 	s.totalNetOutput.Add(bytes)
+	sec := time.Now().Unix()
+	for {
+		cur := s.netOutputSecond.Load()
+		if cur == sec {
+			s.netOutputInSecond.Add(bytes)
+			return
+		}
+		if sec > cur {
+			if s.netOutputSecond.CompareAndSwap(cur, sec) {
+				s.netOutputInSecond.Store(bytes)
+				return
+			}
+			continue
+		}
+		// Clock skew fallback
+		s.netOutputInSecond.Add(bytes)
+		return
+	}
 }
 
 // OnRejectedConnection increments the rejected connections counter.
