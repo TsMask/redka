@@ -11,7 +11,6 @@
 # Test binary, built with `go test -c`
 *.test
 *.log
-*.exe
 redka.db*
 redka.sqlite*
 
@@ -27,7 +26,7 @@ profile.cov
 # Go workspace file
 go.work
 go.work.sum
-redka
+scripts/dist
 scripts/redka.*.yaml
 scripts/redka-*.deb
 scripts/redka-*.rpm
@@ -39,3 +38,4 @@ __debug_*
 # Editor/IDE
 # .idea/
 # .vscode/
+.claude

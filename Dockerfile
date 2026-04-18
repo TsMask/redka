@@ -15,7 +15,7 @@ RUN go build \
        	-X github.com/tsmask/redka/config.Version=${VERSION} \
        	-X github.com/tsmask/redka/config.Commit=${COMMIT} \
        	-X github.com/tsmask/redka/config.Date=${DATE}" \
-    -trimpath -o redka main.go
+    -trimpath -o build/redka cmd/redka/main.go
 
 # Final stage
 FROM alpine:3.21 AS runtime
@@ -24,7 +24,7 @@ RUN apk add --no-cache ca-certificates && mkdir -p /usr/local/etc/redka /var/log
 
 WORKDIR /usr/local/etc/redka
 
-COPY --from=builder /redka/redka /usr/local/bin/redka
+COPY --from=builder /redka/build/redka /usr/local/bin/redka
 COPY --from=builder /redka/scripts/redka.yaml /usr/local/etc/redka/redka.yaml
 
 EXPOSE 6379/tcp

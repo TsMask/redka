@@ -31,7 +31,7 @@ build:
 		-X github.com/tsmask/redka/config.Version=$(build_ver) \
 		-X github.com/tsmask/redka/config.Commit=$(build_rev) \
 		-X github.com/tsmask/redka/config.Date=$(build_date)" \
-		-trimpath -o redka main.go
+		-trimpath -o build/redka cmd/redka/main.go
 	@echo "✓ finished build"
 
 run:

@@ -61,7 +61,7 @@ Redka 支持命令行参数和 YAML 配置文件。
 | `-p` | 监听端口 | `6379` |
 | `-s` | Unix socket 路径（覆盖 host 和 port） | 无 |
 | `-a` | 认证密码 | 无 |
-| `-c` | 配置文件路径（会被命令行参数覆盖） | 无 [配置文件示例](./scripts/redka.yaml) |
+| `-c` | 配置文件路径（会被命令行参数覆盖） | 无 [配置文件示例](./scripts/build/redka.yaml) |
 | `-v` | 启用详细日志和性能分析端点 | `false` |
 | `db-dsn` | 数据库连接字符串 | `file:/tmp/redka.sqlite?vfs=memdb` |
 
@@ -97,20 +97,43 @@ Redka 不追求极致性能。使用 SQLite 这种通用关系型后端无法击
 
 ```text
 redka/
-├── main.go                # 服务入口
+├── redka.go               # 库入口（可作为库引用）
+├── cmd/redka/main.go      # 服务入口
 ├── server/                # 服务器实现
 ├── internal/              # 内部核心模块
 │   ├── core/              # 核心类型定义
 │   ├── store/             # 数据库存储层
-│   ├── rstring/          # 字符串操作
+│   ├── rstring/           # 字符串操作
 │   ├── rlist/             # 列表操作
 │   ├── rset/              # 集合操作
 │   ├── rzset/             # 有序集合操作
 │   └── rhash/             # 哈希操作
 ├── config/                # 配置管理
+├── examples/              # 库使用示例
 ├── scripts/               # 脚本和配置示例
 └── README.md              # 本文件
 ```
+
+## 库使用
+
+Redka 可作为嵌入式库使用，以携程方式启动服务：
+
+```go
+import "github.com/tsmask/redka"
+
+func main() {
+    // 携程启动
+    ready, srv := redka.StartAsync(":6379", "sqlite://test.db")
+    if err := <-ready; err != nil {
+        panic(err)
+    }
+
+    // 等待 shutdown 信号
+    srv.WaitForShutdown()
+}
+```
+
+更多示例参考 [examples/](examples/) 目录。
 
 ## 测试
 

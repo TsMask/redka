@@ -33,7 +33,7 @@ mkdir -p "${DEST_DIR}/BUILD/usr/local/bin"
 mkdir -p "${DEST_DIR}/BUILD/usr/local/etc/redka"
 mkdir -p "${DEST_DIR}/BUILD/etc/systemd/system"
 
-install -m 755 "${PROJECT_DIR}/redka" "${DEST_DIR}/BUILD/usr/local/bin/redka"
+install -m 755 "${PROJECT_DIR}/build/redka" "${DEST_DIR}/BUILD/usr/local/bin/redka"
 install -m 644 "${SCRIPTS_DIR}/build/redka.yaml" "${DEST_DIR}/BUILD/usr/local/etc/redka/redka.example.yaml"
 install -m 644 "${SCRIPTS_DIR}/build/redka.service" "${DEST_DIR}/BUILD/etc/systemd/system/redka.service"
 
@@ -110,8 +110,7 @@ cp "${SCRIPTS_DIR}/redka.service" "${DEST_DIR}/redka.service"
 
 rpmbuild --define "_topdir ${DEST_DIR}" -bb "${DEST_DIR}/SPEC"
 
-mkdir -p "${SCRIPTS_DIR}"
-cp "${DEST_DIR}/RPMS/${ARCH}/${PKG_VERSION}" "${SCRIPTS_DIR}/${PKG_OUTPUT}"
+cp "${DEST_DIR}/RPMS/${ARCH}/${PKG_VERSION}" "${PROJECT_DIR}/build/${PKG_OUTPUT}"
 rm -rf "${DEST_DIR}"
 
-echo "${SCRIPTS_DIR}/${PKG_OUTPUT}"
+echo "${PROJECT_DIR}/build/${PKG_OUTPUT}"

@@ -32,7 +32,7 @@ mkdir -p "${DEST_DIR}/usr/local/bin"
 mkdir -p "${DEST_DIR}/usr/local/etc/redka"
 mkdir -p "${DEST_DIR}/etc/systemd/system"
 
-install -m 755 "${PROJECT_DIR}/redka" "${DEST_DIR}/usr/local/bin/redka"
+install -m 755 "${PROJECT_DIR}/build/redka" "${DEST_DIR}/usr/local/bin/redka"
 install -m 644 "${SCRIPTS_DIR}/build/redka.yaml" "${DEST_DIR}/usr/local/etc/redka/redka.example.yaml"
 install -m 644 "${SCRIPTS_DIR}/build/redka.service" "${DEST_DIR}/etc/systemd/system/redka.service"
 
@@ -96,8 +96,7 @@ PRERM
 chmod 755 "${DEST_DIR}/DEBIAN/postinst"
 chmod 755 "${DEST_DIR}/DEBIAN/prerm"
 
-mkdir -p "${SCRIPTS_DIR}"
-dpkg-deb --build "${DEST_DIR}" "${SCRIPTS_DIR}/${PKG_OUTPUT}"
+dpkg-deb --build "${DEST_DIR}" "${PROJECT_DIR}/build/${PKG_OUTPUT}"
 rm -rf "${DEST_DIR}"
 
-echo "${SCRIPTS_DIR}/${PKG_OUTPUT}"
+echo "${PROJECT_DIR}/build/${PKG_OUTPUT}"
