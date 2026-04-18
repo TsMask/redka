@@ -26,10 +26,9 @@ profile.cov
 # Go workspace file
 go.work
 go.work.sum
+/build/
 scripts/dist
 scripts/redka.*.yaml
-scripts/redka-*.deb
-scripts/redka-*.rpm
 __debug_*
 
 # env file

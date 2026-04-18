@@ -21,7 +21,7 @@ func FlagConfig() *ServerConfig {
 	// Track which flags were explicitly set
 	flag.StringVar(
 		&cfg.Host, "h",
-		cmp.Or(os.Getenv("REDKA_HOST"), "localhost"),
+		cmp.Or(os.Getenv("REDKA_HOST"), "0.0.0.0"),
 		"server host",
 	)
 	flag.StringVar(

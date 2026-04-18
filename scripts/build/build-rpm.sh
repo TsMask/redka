@@ -1,12 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
+export PATH=$PATH:/usr/local/go/bin
 
 VERSION="2.0.0"
 PKG_NAME="redka"
 
+while getopts "v:h" opt; do
+    case $opt in
+        v) VERSION="$OPTARG" ;;
+        h) echo "Usage: $0 [-v VERSION]" && exit 0 ;;
+        *) exit 1 ;;
+    esac
+done
+shift $((OPTIND -1))
+
 SCRIPTS_DIR="$(dirname "$(realpath "$0")")"
-PROJECT_DIR="$(cd "${SCRIPTS_DIR}/.." && pwd)"
+PROJECT_DIR="$(cd "${SCRIPTS_DIR}/../.." && pwd)"
 
 OS_VERSION_ID=$(. /etc/os-release && echo "${VERSION_ID}")
 OS_ID=$(. /etc/os-release && echo "${ID}")
@@ -34,8 +44,8 @@ mkdir -p "${DEST_DIR}/BUILD/usr/local/etc/redka"
 mkdir -p "${DEST_DIR}/BUILD/etc/systemd/system"
 
 install -m 755 "${PROJECT_DIR}/build/redka" "${DEST_DIR}/BUILD/usr/local/bin/redka"
-install -m 644 "${SCRIPTS_DIR}/build/redka.yaml" "${DEST_DIR}/BUILD/usr/local/etc/redka/redka.example.yaml"
-install -m 644 "${SCRIPTS_DIR}/build/redka.service" "${DEST_DIR}/BUILD/etc/systemd/system/redka.service"
+install -m 644 "${SCRIPTS_DIR}/redka.yaml" "${DEST_DIR}/BUILD/usr/local/etc/redka/redka.example.yaml"
+install -m 644 "${SCRIPTS_DIR}/redka.service" "${DEST_DIR}/BUILD/etc/systemd/system/redka.service"
 
 cat > "${DEST_DIR}/SPEC" <<EOF
 Name:           ${PKG_NAME}
@@ -105,7 +115,7 @@ fi
 EOF
 
 cp "${SCRIPTS_DIR}/redka.yaml" "${DEST_DIR}/redka.example.yaml"
-cp "${PROJECT_DIR}/redka" "${DEST_DIR}/redka"
+cp "${PROJECT_DIR}/build/redka" "${DEST_DIR}/redka"
 cp "${SCRIPTS_DIR}/redka.service" "${DEST_DIR}/redka.service"
 
 rpmbuild --define "_topdir ${DEST_DIR}" -bb "${DEST_DIR}/SPEC"
@@ -114,3 +124,4 @@ cp "${DEST_DIR}/RPMS/${ARCH}/${PKG_VERSION}" "${PROJECT_DIR}/build/${PKG_OUTPUT}
 rm -rf "${DEST_DIR}"
 
 echo "${PROJECT_DIR}/build/${PKG_OUTPUT}"
+# sudo bash scripts/build/build-rpm.sh -v 2.0.0

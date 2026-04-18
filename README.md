@@ -139,10 +139,10 @@ func main() {
 
 ```bash
 # 运行功能测试脚本（需先启动服务）
-./scripts/test/test_redis-cli.sh [port] [host] [password]
+sudo bash scripts/test/test_redis-cli.sh [port] [host] [password]
 
 # 示例
-bash ./scripts/test/test_set_commands.sh 6380 localhost password
+sudo bash scripts/test/test_set_commands.sh 6380 localhost password
 ```
 
 测试脚本会自动检测 command.go 中支持的全部命令，确保测试覆盖完整。
@@ -151,10 +151,10 @@ bash ./scripts/test/test_set_commands.sh 6380 localhost password
 
 ```bash
 # 打包 Deb 包
-./scripts/build/build-deb.sh
+sudo bash scripts/build/build-deb.sh -v 2.0.0
 
 # 打包 RPM 包
-./scripts/build/build-rpm.sh
+sudo bash scripts/build/build-rpm.sh -v 2.0.0
 
 # 普通二进制
 make build
