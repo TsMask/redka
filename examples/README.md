@@ -22,6 +22,20 @@ go run ./examples/custom
 
 监听端口 6380，使用 SQLite 文件存储。
 
+## unixsocket
+
+Unix Socket 连接示例，展示如何通过 Unix Domain Socket 连接 Redka 服务器。
+
+```bash
+# 启动服务器
+go run ./examples/unixsocket/server
+
+# 另开终端，运行客户端测试
+go run ./examples/unixsocket/client
+```
+
+服务器监听 `/tmp/redka.sock`，使用 redis/go-redis/v9 SDK 连接测试。
+
 ## 库使用方式
 
 ```go
