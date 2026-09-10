@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/tidwall/redcon"
 	"github.com/tsmask/redka/server/internal/redis"
@@ -23,27 +24,27 @@ const ctxKeyState = "state"
 // getState returns the connection state.
 func getState(conn redcon.Conn) *connState {
 	ctx := connContext(conn)
-	if v, ok := ctx[ctxKeyState]; ok {
+	if v, ok := ctx.Load(ctxKeyState); ok {
 		if s, ok := v.(*connState); ok {
 			return s
 		}
 	}
 	state := new(connState)
-	ctx[ctxKeyState] = state
+	ctx.Store(ctxKeyState, state)
 	return state
 }
 
-// connContext returns the context map from the connection,
+// connContext returns the sync.Map from the connection context,
 // creating and setting a new one if necessary.
-func connContext(conn redcon.Conn) map[string]any {
+func connContext(conn redcon.Conn) *sync.Map {
 	if existing := conn.Context(); existing != nil {
-		if m, ok := existing.(map[string]any); ok {
+		if m, ok := existing.(*sync.Map); ok {
 			return m
 		}
 	}
-	ctx := make(map[string]any)
-	conn.SetContext(ctx)
-	return ctx
+	m := &sync.Map{}
+	conn.SetContext(m)
+	return m
 }
 
 // connState represents the connection state.

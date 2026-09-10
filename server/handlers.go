@@ -76,31 +76,18 @@ func auth(next redcon.HandlerFunc) redcon.HandlerFunc {
 }
 
 // timeout adds request timeout control to prevent slow queries from blocking resources.
+// Sets a deadline on the request context so that downstream database operations
+// (GORM/SQL) respect the timeout and are cancelled automatically. This avoids
+// spawning an extra goroutine per request and prevents goroutine leaks.
 func timeout(next redcon.HandlerFunc, timeout time.Duration) redcon.HandlerFunc {
 	return func(conn redcon.Conn, cmd redcon.Command) {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
 		ctxMap := connContext(conn)
-		ctxMap[redis.CtxKeyRequest] = ctx
+		ctxMap.Store(redis.CtxKeyRequest, ctx)
 
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			next(conn, cmd)
-		}()
-
-		select {
-		case <-done:
-			return
-		case <-ctx.Done():
-			slog.Warn("request timeout",
-				"command", string(cmd.Args[0]),
-				"client", conn.RemoteAddr(),
-				"timeout", timeout,
-			)
-			conn.WriteError("ERR operation timeout")
-		}
+		next(conn, cmd)
 	}
 }
 
@@ -154,7 +141,7 @@ func parse(next redcon.HandlerFunc) redcon.HandlerFunc {
 
 func getRuntimeStats(conn redcon.Conn) *redis.RuntimeStats {
 	ctx := connContext(conn)
-	if v := ctx[redis.CtxKeyRuntime]; v != nil {
+	if v, ok := ctx.Load(redis.CtxKeyRuntime); ok {
 		if stats, ok := v.(*redis.RuntimeStats); ok {
 			return stats
 		}
@@ -256,15 +243,48 @@ func handleMulti(ctx context.Context, w redis.Writer, state *connState, db *stor
 	}
 }
 
+// readOnlyCommands is the set of commands that do not modify data.
+// These can be executed without a transaction wrapper, which avoids
+// the overhead of BEGIN/COMMIT and reduces connection pool pressure.
+var readOnlyCommands = map[string]struct{}{
+	"get": {}, "mget": {}, "strlen": {}, "getrange": {}, "substr": {},
+	"exists": {}, "type": {}, "ttl": {}, "pttl": {},
+	"keys": {}, "scan": {}, "randomkey": {}, "dbsize": {},
+	"llen": {}, "lindex": {}, "lrange": {},
+	"hget": {}, "hmget": {}, "hgetall": {}, "hexists": {}, "hlen": {},
+	"hkeys": {}, "hvals": {}, "hstrlen": {}, "hrandfield": {}, "hscan": {},
+	"scard": {}, "sismember": {}, "smismember": {}, "smembers": {},
+	"sdiff": {}, "sinter": {}, "sintercard": {}, "sunion": {},
+	"srandmember": {}, "sscan": {},
+	"zcard": {}, "zscore": {}, "zrank": {}, "zrevrank": {},
+	"zcount": {}, "zrange": {}, "zrevrange": {},
+	"zrangebyscore": {}, "zrevrangebyscore": {},
+	"zinter": {}, "zunion": {}, "zscan": {},
+	"ping": {}, "echo": {}, "info": {}, "command": {},
+	"config": {}, "slowlog": {}, "memory": {}, "lolwut": {},
+}
+
+// isReadOnly checks if a command name is read-only.
+func isReadOnly(name string) bool {
+	_, ok := readOnlyCommands[name]
+	return ok
+}
+
 // handleSingle processes a single command.
+// Read-only commands bypass the transaction wrapper to reduce overhead.
 func handleSingle(ctx context.Context, w redis.Writer, state *connState, db *store.Store) {
 	pcmd := state.pop()
 	dbIdx := redis.GetSelectedDB(w)
 
-	// Wrap the command execution in UpdateContext so that commands use the
-	// transaction (tx) which carries the correct dbIdx from ctx via CtxDBIdx.
-	// This ensures SELECT N is respected for all single commands, not just those
-	// that go through d.update(fn).
+	if isReadOnly(pcmd.Name()) {
+		s := &store.Store{Dialect: db.Dialect, DB: db.DB.WithContext(ctx)}
+		_, err := pcmd.Run(w, redis.NewRedka(s, dbIdx))
+		if err != nil {
+			slog.Warn("run single command", "name", pcmd.Name(), "err", err)
+		}
+		return
+	}
+
 	err := db.Transaction(ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		s := &store.Store{Dialect: dialect, DB: tx}
 		_, err := pcmd.Run(w, redis.NewRedka(s, dbIdx))

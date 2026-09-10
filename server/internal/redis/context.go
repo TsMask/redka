@@ -36,47 +36,44 @@ const (
 )
 
 // ConnWriter wraps a redcon.Conn to implement the Writer interface.
-// It provides map-backed context storage so that multiple subsystems
+// It provides sync.Map-backed context storage so that multiple subsystems
 // (config, state, etc.) can share the connection without type conflicts.
+// sync.Map is optimized for read-heavy workloads where keys are written
+// once at connection setup and read many times per command.
 type ConnWriter struct {
 	conn         redcon.Conn
-	ctx          map[string]any
-	mu           sync.RWMutex // Protects concurrent access to ctx
-	writtenBytes int64        // Track bytes written for network I/O stats
+	ctx          sync.Map
+	writtenBytes int64
 }
 
 // NewConnWriter creates a ConnWriter from a redcon.Conn.
-// If the conn already has a map context (set during accept), it is reused.
+// Migrates any existing map context (set during accept) into the sync.Map.
 func NewConnWriter(conn redcon.Conn) *ConnWriter {
+	cw := &ConnWriter{conn: conn}
 	existing := conn.Context()
 	if m, ok := existing.(map[string]any); ok {
-		return &ConnWriter{conn: conn, ctx: m}
+		for k, v := range m {
+			cw.ctx.Store(k, v)
+		}
 	}
-	// Fresh connection, create new context map
-	ctx := make(map[string]any)
-	conn.SetContext(ctx)
-	return &ConnWriter{conn: conn, ctx: ctx}
+	conn.SetContext(&cw.ctx)
+	return cw
 }
 
 // Context returns the value for the given key from the connection context.
 func (w *ConnWriter) Context(key string) any {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.ctx[key]
+	v, _ := w.ctx.Load(key)
+	return v
 }
 
 // SetContext sets the value for the given key in the connection context.
 func (w *ConnWriter) SetContext(key string, v any) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.ctx[key] = v
+	w.ctx.Store(key, v)
 }
 
 // ConnID returns the client connection ID.
 func (w *ConnWriter) ConnID() int64 {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	if v, ok := w.ctx[CtxKeyConnID]; ok {
+	if v, ok := w.ctx.Load(CtxKeyConnID); ok {
 		if id, ok := v.(int64); ok {
 			return id
 		}

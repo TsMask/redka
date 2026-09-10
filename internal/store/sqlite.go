@@ -33,17 +33,19 @@ func newSQLite(dsn string) (*Store, error) {
 }
 
 // configurePoolSQLite sets the number of connections for SQLite.
-// SQLite uses database-level locking for writes, so we limit the number of
-// concurrent connections to reduce lock contention and improve performance.
+// With WAL mode enabled, SQLite supports concurrent readers.
+// We use 1 writer (enforced by SQLite locking) + multiple readers.
+// MaxOpenConns=1 would serialize everything; a higher value allows
+// concurrent reads which is critical for read-heavy workloads.
 func (s *Store) configurePoolSQLite() error {
 	sqlDB, err := s.DB.DB()
 	if err != nil {
 		return err
 	}
-	sqlDB.SetMaxOpenConns(4)
-	sqlDB.SetMaxIdleConns(2)
-	sqlDB.SetConnMaxLifetime(30 * time.Minute) // Prevent stale connections
-	sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Reclaim idle connections
+	sqlDB.SetMaxOpenConns(8)
+	sqlDB.SetMaxIdleConns(4)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 	return nil
 }
 

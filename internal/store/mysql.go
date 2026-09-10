@@ -37,10 +37,10 @@ func (s *Store) configurePool() error {
 	if err != nil {
 		return err
 	}
-	sqlDB.SetMaxOpenConns(200)
-	sqlDB.SetMaxIdleConns(50)
-	sqlDB.SetConnMaxLifetime(30 * time.Minute) // Prevent stale connections
-	sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Reclaim idle connections
+	sqlDB.SetMaxOpenConns(400)
+	sqlDB.SetMaxIdleConns(100)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 	return nil
 }
 

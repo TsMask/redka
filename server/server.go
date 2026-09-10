@@ -4,6 +4,7 @@ package server
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/tidwall/redcon"
@@ -56,17 +57,17 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 			return false
 		}
 
-		// Initialize connection context map with config
-		ctx := make(map[string]any)
-		ctx[redis.CtxKeyConfig] = cfg
-		ctx[redis.CtxKeyRuntime] = runtimeStats
-		ctx[redis.CtxKeyClientRegistry] = clientRegistry
-		ctx[redis.CtxKeySlowLog] = slowLog
-		conn.SetContext(ctx)
+		// Initialize connection context using sync.Map for lock-free reads
+		var ctx sync.Map
+		ctx.Store(redis.CtxKeyConfig, cfg)
+		ctx.Store(redis.CtxKeyRuntime, runtimeStats)
+		ctx.Store(redis.CtxKeyClientRegistry, clientRegistry)
+		ctx.Store(redis.CtxKeySlowLog, slowLog)
+		conn.SetContext(&ctx)
 
 		// Register the client
 		clientID := clientRegistry.Add(conn, 0)
-		ctx[redis.CtxKeyConnID] = clientID
+		ctx.Store(redis.CtxKeyConnID, clientID)
 
 		runtimeStats.OnAccept()
 		slog.Info("accept connection", "client", conn.RemoteAddr(), "db", 0, "id", clientID)
@@ -74,10 +75,12 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 	}
 	closed := func(conn redcon.Conn, err error) {
 		// Get client ID from context to unregister
-		if ctx := conn.Context(); ctx != nil {
-			if m, ok := ctx.(map[string]any); ok {
-				if id, ok := m[redis.CtxKeyConnID].(int64); ok {
-					clientRegistry.Remove(id)
+		if raw := conn.Context(); raw != nil {
+			if m, ok := raw.(*sync.Map); ok {
+				if v, ok := m.Load(redis.CtxKeyConnID); ok {
+					if id, ok := v.(int64); ok {
+						clientRegistry.Remove(id)
+					}
 				}
 			}
 		}
