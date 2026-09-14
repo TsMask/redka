@@ -1,0 +1,9 @@
+This project contains code derived from Redka:
+https://github.com/nalgeon/redka
+
+Upstream Redka is Copyright (c) 2024, Anton Zhiyanov
+<https://antonz.org> and is licensed under the BSD 3-Clause License.
+
+The project's original code is distributed under the MIT License. Portions
+derived from upstream Redka remain subject to the BSD 3-Clause License. See
+LICENSE and THIRD_PARTY_LICENSES.md.

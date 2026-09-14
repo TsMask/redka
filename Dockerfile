@@ -26,6 +26,9 @@ WORKDIR /usr/local/etc/redka
 
 COPY --from=builder /redka/build/redka /usr/local/bin/redka
 COPY --from=builder /redka/scripts/build/redka.yaml /usr/local/etc/redka/redka.yaml
+COPY --from=builder /redka/LICENSE /usr/share/licenses/redka/LICENSE
+COPY --from=builder /redka/NOTICE /usr/share/licenses/redka/NOTICE
+COPY --from=builder /redka/THIRD_PARTY_LICENSES.md /usr/share/licenses/redka/THIRD_PARTY_LICENSES.md
 
 EXPOSE 6379/tcp
 

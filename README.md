@@ -174,6 +174,14 @@ Redka 的实现离不开这些优秀项目及其创建者：
 - [SQLite](https://sqlite.org/) ([D. Richard Hipp](https://www.sqlite.org/crew.html)) - 驱动世界的进程内数据库
 - [Redcon](https://github.com/tidwall/redcon) ([Josh Baker](https://github.com/tidwall)) - 简洁易用的 RESP 服务器实现
 - [GORM](https://gorm.io/) - Go 语言的 ORM 库
-- [Fork nalgeon/redka](https://github.com/nalgeon/redka) - Redka用SQL重新实现，与Redis API保持兼容
 
 Logo 字体由 [Ek Type](https://ektype.in/) 提供。
+
+## License
+
+Copyright (c) 2026 TsMask <340112800@qq.com>
+The original code in this project is licensed under the MIT License.
+
+Portions derived from [nalgeon/redka](https://github.com/nalgeon/redka) are
+Copyright (c) 2024 Anton Zhiyanov and remain licensed under the BSD 3-Clause
+License. See `NOTICE` and `THIRD_PARTY_LICENSES.md` for details.

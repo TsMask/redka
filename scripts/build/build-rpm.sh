@@ -42,17 +42,21 @@ mkdir -p "${DEST_DIR}"
 mkdir -p "${DEST_DIR}/BUILD/usr/local/bin"
 mkdir -p "${DEST_DIR}/BUILD/usr/local/etc/redka"
 mkdir -p "${DEST_DIR}/BUILD/etc/systemd/system"
+mkdir -p "${DEST_DIR}/BUILD/usr/share/licenses/redka"
 
 install -m 755 "${PROJECT_DIR}/build/redka" "${DEST_DIR}/BUILD/usr/local/bin/redka"
 install -m 644 "${SCRIPTS_DIR}/redka.yaml" "${DEST_DIR}/BUILD/usr/local/etc/redka/redka.example.yaml"
 install -m 644 "${SCRIPTS_DIR}/redka.service" "${DEST_DIR}/BUILD/etc/systemd/system/redka.service"
+install -m 644 "${PROJECT_DIR}/LICENSE" "${DEST_DIR}/BUILD/usr/share/licenses/redka/LICENSE"
+install -m 644 "${PROJECT_DIR}/NOTICE" "${DEST_DIR}/BUILD/usr/share/licenses/redka/NOTICE"
+install -m 644 "${PROJECT_DIR}/THIRD_PARTY_LICENSES.md" "${DEST_DIR}/BUILD/usr/share/licenses/redka/THIRD_PARTY_LICENSES.md"
 
 cat > "${DEST_DIR}/SPEC" <<EOF
 Name:           ${PKG_NAME}
 Version:        ${VERSION}
 Release:        ${OS_ID}${OS_VERSION_ID}
 Summary:        Database Service
-License:        BSD 3-Clause
+License:        MIT and BSD-3-Clause
 URL:            https://github.com/TsMask/redka
 BuildArch:      ${ARCH}
 Requires(post): systemd
@@ -74,6 +78,10 @@ mkdir -p %{buildroot}/etc/systemd/system
 install -m 755 %{_builddir}/usr/local/bin/redka %{buildroot}/usr/local/bin/redka
 install -m 644 %{_builddir}/usr/local/etc/redka/redka.example.yaml %{buildroot}/usr/local/etc/redka/redka.example.yaml
 install -m 644 %{_builddir}/etc/systemd/system/redka.service %{buildroot}/etc/systemd/system/redka.service
+mkdir -p %{buildroot}/usr/share/licenses/redka
+install -m 644 %{_builddir}/usr/share/licenses/redka/LICENSE %{buildroot}/usr/share/licenses/redka/LICENSE
+install -m 644 %{_builddir}/usr/share/licenses/redka/NOTICE %{buildroot}/usr/share/licenses/redka/NOTICE
+install -m 644 %{_builddir}/usr/share/licenses/redka/THIRD_PARTY_LICENSES.md %{buildroot}/usr/share/licenses/redka/THIRD_PARTY_LICENSES.md
 
 %pre
 # Nothing to pre
@@ -108,6 +116,9 @@ fi
 /usr/local/bin/redka
 /usr/local/etc/redka/redka.example.yaml
 /etc/systemd/system/redka.service
+/usr/share/licenses/redka/LICENSE
+/usr/share/licenses/redka/NOTICE
+/usr/share/licenses/redka/THIRD_PARTY_LICENSES.md
 
 %changelog
 * $(date '+%a %b %d %Y') TsMask <https://github.com/TsMask/redka> - ${VERSION}-1
