@@ -2,12 +2,15 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tidwall/redcon"
 	"github.com/tsmask/redka/config"
+	"github.com/tsmask/redka/internal/core"
 	"github.com/tsmask/redka/internal/store"
 	"github.com/tsmask/redka/server/internal/command"
 	"github.com/tsmask/redka/server/internal/redis"
@@ -184,7 +187,6 @@ func multi(next redcon.HandlerFunc) redcon.HandlerFunc {
 				conn.WriteError(redis.ErrNestedMulti.Error())
 			case "exec":
 				state.pop()
-				conn.WriteArray(len(state.cmds))
 				next(conn, cmd)
 				state.inMulti = false
 			case "discard":
@@ -249,19 +251,204 @@ func handleMulti(ctx context.Context, w redis.Writer, state *connState, db *stor
 	// Use context to carry dbIdx so it is per-request, not per-DB-instance.
 	// This eliminates the data race caused by WithDB modifying shared state.
 	dbIdx := redis.GetSelectedDB(w)
-	err := db.Transaction(ctx, func(tx *gorm.DB, dialect store.Dialect) error {
-		s := store.FromTx(dialect, tx)
-		for _, pcmd := range state.cmds {
-			_, err := pcmd.Run(w, redis.NewRedka(s, dbIdx))
+	var responses *multiWriter
+	err := db.TransactionRetry(ctx, func(tx *gorm.DB, dialect store.Dialect) error {
+		responses = newMultiWriter(w)
+		for i, pcmd := range state.cmds {
+			// A savepoint keeps a failing command atomic even when its repository
+			// has already written part of the operation before returning an error.
+			err := runMultiCommand(tx, dialect, dbIdx, i, pcmd, responses)
 			if err != nil {
-				slog.Warn("run multi command", "name", pcmd.Name(), "err", err)
-				return err
+				if !isMultiRuntimeError(err) {
+					return err
+				}
+				slog.Debug("run multi command", "name", pcmd.Name(), "err", err)
 			}
 		}
 		return nil
 	})
 	if err != nil {
 		slog.Warn("run multi", "err", err)
+		w.WriteError("ERR EXEC transaction failed")
+		return
+	}
+	w.WriteArray(len(state.cmds))
+	responses.flush()
+}
+
+func runMultiCommand(
+	tx *gorm.DB, dialect store.Dialect, dbIdx, index int, pcmd redis.Cmd, w redis.Writer,
+) error {
+	needsSavepoint := multiNeedsSavepoint(pcmd.Name())
+	var name string
+	if needsSavepoint {
+		name = "redka_multi_" + strconv.Itoa(index)
+		if err := tx.Exec("SAVEPOINT " + name).Error; err != nil {
+			return err
+		}
+	}
+
+	s := store.FromTx(dialect, tx)
+	_, runErr := pcmd.Run(w, redis.NewRedka(s, dbIdx))
+	if runErr != nil && needsSavepoint {
+		if err := tx.Exec("ROLLBACK TO SAVEPOINT " + name).Error; err != nil {
+			slog.Warn("rollback multi command",
+				"name", pcmd.Name(), "runErr", runErr, "err", err)
+			return err
+		}
+	}
+	// COMMIT or the outer ROLLBACK releases all still-active savepoints. Avoid
+	// one RELEASE round trip for every successful command in an EXEC queue.
+	return runErr
+}
+
+func multiNeedsSavepoint(name string) bool {
+	switch name {
+	// Server and connection reads. CONFIG currently supports GET only.
+	case "command", "config", "dbsize", "echo", "info", "lolwut", "ping":
+		return false
+
+	// Key reads.
+	case "exists", "keys", "pttl", "randomkey", "scan", "ttl", "type":
+		return false
+
+	// List reads.
+	case "lindex", "llen", "lrange":
+		return false
+
+	// String reads.
+	case "get", "getrange", "mget", "strlen", "substr":
+		return false
+
+	// Hash reads.
+	case "hexists", "hget", "hgetall", "hkeys", "hlen", "hmget",
+		"hrandfield", "hscan", "hstrlen", "hvals":
+		return false
+
+	// Set reads.
+	case "scard", "sdiff", "sinter", "sintercard", "sismember",
+		"smembers", "smismember", "srandmember", "sscan", "sunion":
+		return false
+
+	// Sorted-set reads.
+	case "zcard", "zcount", "zinter", "zrange", "zrangebyscore",
+		"zrank", "zrevrange", "zrevrangebyscore", "zrevrank",
+		"zscan", "zscore", "zunion":
+		return false
+
+	// These mutating commands validate convertible arguments and the existing
+	// key type before their first value write. A runtime error therefore
+	// leaves nothing to roll back, while a SQL error still rolls back the
+	// whole outer EXEC transaction. Keep unaudited writes protected.
+	case "set", "setex", "psetex", "setnx",
+		"hset", "hmset", "sadd", "zadd",
+		"incr", "decr", "incrby", "decrby", "incrbyfloat":
+		return false
+
+	default:
+		// Unknown and mutating commands conservatively get a savepoint.
+		return true
+	}
+}
+
+func isMultiRuntimeError(err error) bool {
+	switch {
+	case errors.Is(err, core.ErrArgument),
+		errors.Is(err, core.ErrKeyType),
+		errors.Is(err, core.ErrNotFound),
+		errors.Is(err, core.ErrValueType),
+		errors.Is(err, redis.ErrInvalidArgNum),
+		errors.Is(err, redis.ErrInvalidCursor),
+		errors.Is(err, redis.ErrInvalidExpireTime),
+		errors.Is(err, redis.ErrInvalidFloat),
+		errors.Is(err, redis.ErrInvalidInt),
+		errors.Is(err, redis.ErrInvalidCount),
+		errors.Is(err, redis.ErrNotFound),
+		errors.Is(err, redis.ErrOutOfRange),
+		errors.Is(err, redis.ErrSyntaxError),
+		errors.Is(err, redis.ErrUnknownSubcmd):
+		return true
+	default:
+		return false
+	}
+}
+
+type multiContextUpdate struct {
+	key string
+	val any
+}
+
+// multiWriter defers RESP output until the outer EXEC transaction commits.
+// That makes transient SQL failures safe to retry without exposing partial
+// responses from an attempt that was rolled back.
+type multiWriter struct {
+	parent   redis.Writer
+	data     []byte
+	contexts []multiContextUpdate
+}
+
+func newMultiWriter(parent redis.Writer) *multiWriter {
+	return &multiWriter{parent: parent}
+}
+
+func (w *multiWriter) Context(key string) any {
+	return w.parent.Context(key)
+}
+
+func (w *multiWriter) SetContext(key string, val any) {
+	w.contexts = append(w.contexts, multiContextUpdate{key: key, val: val})
+}
+
+func (w *multiWriter) WriteAny(v any) {
+	w.data = redcon.AppendAny(w.data, v)
+}
+
+func (w *multiWriter) WriteArray(count int) {
+	w.data = redcon.AppendArray(w.data, count)
+}
+
+func (w *multiWriter) WriteBulk(bulk []byte) {
+	w.data = redcon.AppendBulk(w.data, bulk)
+}
+
+func (w *multiWriter) WriteBulkString(bulk string) {
+	w.data = redcon.AppendBulkString(w.data, bulk)
+}
+
+func (w *multiWriter) WriteError(msg string) {
+	w.data = redcon.AppendError(w.data, msg)
+}
+
+func (w *multiWriter) WriteInt(num int) {
+	w.data = redcon.AppendInt(w.data, int64(num))
+}
+
+func (w *multiWriter) WriteInt64(num int64) {
+	w.data = redcon.AppendInt(w.data, num)
+}
+
+func (w *multiWriter) WriteNull() {
+	w.data = redcon.AppendNull(w.data)
+}
+
+func (w *multiWriter) WriteRaw(data []byte) {
+	w.data = append(w.data, data...)
+}
+
+func (w *multiWriter) WriteString(str string) {
+	w.data = redcon.AppendString(w.data, str)
+}
+
+func (w *multiWriter) WriteUint64(num uint64) {
+	w.data = redcon.AppendUint(w.data, num)
+}
+
+func (w *multiWriter) flush() {
+	for _, update := range w.contexts {
+		w.parent.SetContext(update.key, update.val)
+	}
+	if len(w.data) > 0 {
+		w.parent.WriteRaw(w.data)
 	}
 }
 
