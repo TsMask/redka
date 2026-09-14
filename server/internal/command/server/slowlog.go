@@ -33,12 +33,23 @@ func ParseSlowLog(b redis.BaseCmd) (SlowLogCmd, error) {
 	switch subcmd {
 	case "GET":
 		cmd.count = 10
-		if len(args) > 1 {
-			if c, err := strconv.Atoi(string(args[1])); err == nil {
-				cmd.count = c
+		if len(args) > 2 {
+			return SlowLogCmd{}, redis.ErrInvalidArgNum
+		}
+		if len(args) == 2 {
+			count, err := strconv.Atoi(string(args[1]))
+			if err != nil {
+				return SlowLogCmd{}, redis.ErrInvalidInt
 			}
+			if count <= 0 {
+				return SlowLogCmd{}, redis.ErrInvalidCount
+			}
+			cmd.count = count
 		}
 	case "LEN", "RESET":
+		if len(args) != 1 {
+			return SlowLogCmd{}, redis.ErrInvalidArgNum
+		}
 		cmd.count = 0
 	default:
 		return SlowLogCmd{}, redis.ErrSyntaxError

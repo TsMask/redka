@@ -18,6 +18,7 @@ var (
 	ErrInvalidExpireTime = errors.New("ERR invalid expire time")
 	ErrInvalidFloat      = errors.New("ERR value is not a float")
 	ErrInvalidInt        = errors.New("ERR value is not an integer")
+	ErrInvalidCount      = errors.New("ERR count should be greater than 0")
 	ErrNestedMulti       = errors.New("ERR MULTI calls can not be nested")
 	ErrNotFound          = errors.New("ERR no such key")
 	ErrNotInMulti        = errors.New("ERR EXEC without MULTI")

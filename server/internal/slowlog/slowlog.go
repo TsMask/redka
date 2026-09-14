@@ -11,8 +11,8 @@ import (
 // Entry represents a single slow log entry.
 type Entry struct {
 	ID         int64
-	StartTime  int64  // Unix timestamp (seconds)
-	Duration   int64  // Microseconds
+	StartTime  int64 // Unix timestamp (seconds)
+	Duration   int64 // Microseconds
 	Cmd        [][]byte
 	Client     string // "ip:port"
 	ClientName string
@@ -104,8 +104,11 @@ func (s *SlowLog) Push(d time.Duration, cmdArgs [][]byte, client, clientName str
 func (s *SlowLog) Get(n int) []Entry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if n == -1 || n > len(s.entries) {
+	switch {
+	case n == -1 || n > len(s.entries):
 		n = len(s.entries)
+	case n < 0:
+		n = 0
 	}
 	entries := make([]Entry, n)
 	copy(entries, s.entries[:n])
