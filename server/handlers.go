@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tidwall/redcon"
+	"github.com/tsmask/redka/config"
 	"github.com/tsmask/redka/internal/store"
 	"github.com/tsmask/redka/server/internal/command"
 	"github.com/tsmask/redka/server/internal/redis"
@@ -36,43 +37,64 @@ func createHandlers(db *store.Store, clientRegistry *redis.ClientRegistry, slowL
 // as defined by Redis protocol standards.
 func auth(next redcon.HandlerFunc) redcon.HandlerFunc {
 	return func(conn redcon.Conn, cmd redcon.Command) {
-		name := strings.ToLower(string(cmd.Args[0]))
-
-		// Commands that are allowed without authentication
-		// These are connection-related commands that must work before authentication
-		switch name {
-		case "auth", // AUTH - authenticate the connection
-			"ping",      // PING - check server liveliness
-			"echo",      // ECHO - echo a message (diagnostic)
-			"quit",      // QUIT - close the connection
-			"hello",     // HELLO - RESP3 protocol negotiation
-			"cluster",   // CLUSTER - cluster commands (future)
-			"readOnly",  // READONLY - for replica connections
-			"readWrite", // READWRITE - to disable read-only mode
-			"client":
-			// CLIENT subcommands (CAPA, etc.) are allowed
-			// but actual client management requires auth
+		if allowedWithoutAuthentication(cmd.Args) {
 			next(conn, cmd)
 			return
 		}
 
-		// Check if password is configured
-		cfg := redis.GetConfig(redis.NewConnWriter(conn))
-		if cfg == nil || cfg.Password == "" {
-			// No password configured, allow all commands
+		ctx := connContext(conn)
+		password := ""
+		if v, ok := ctx.Load(redis.CtxKeyConfig); ok {
+			if cfg, ok := v.(*config.ServerConfig); ok {
+				password = cfg.Password
+			}
+		}
+		if password == "" {
 			next(conn, cmd)
 			return
 		}
 
-		// Check authentication status
-		cw := redis.NewConnWriter(conn)
-		if !redis.IsAuthenticated(cw) {
+		authenticated := false
+		if v, ok := ctx.Load(redis.CtxKeyAuthenticated); ok {
+			authenticated, _ = v.(bool)
+		}
+		if !authenticated {
 			conn.WriteError("NOAUTH Authentication required")
 			return
 		}
 
 		next(conn, cmd)
 	}
+}
+
+func allowedWithoutAuthentication(args [][]byte) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	name := string(args[0])
+	switch {
+	case strings.EqualFold(name, "auth"),
+		strings.EqualFold(name, "ping"),
+		strings.EqualFold(name, "echo"),
+		strings.EqualFold(name, "quit"),
+		strings.EqualFold(name, "hello"),
+		strings.EqualFold(name, "cluster"),
+		strings.EqualFold(name, "readOnly"),
+		strings.EqualFold(name, "readWrite"):
+		return true
+	case !strings.EqualFold(name, "client") || len(args) < 2:
+		return false
+	}
+
+	// Only connection-local metadata commands are safe before AUTH. In
+	// particular, LIST, INFO, KILL, PAUSE, and REPLY can disclose state or
+	// affect another connection, so they require authentication.
+	subcommand := string(args[1])
+	return strings.EqualFold(subcommand, "id") ||
+		strings.EqualFold(subcommand, "getname") ||
+		strings.EqualFold(subcommand, "setname") ||
+		strings.EqualFold(subcommand, "setinfo")
 }
 
 // timeout adds request timeout control to prevent slow queries from blocking resources.
