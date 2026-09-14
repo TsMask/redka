@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/tsmask/redka/server/internal/redis"
 )
@@ -17,9 +18,20 @@ func ParseConfigGet(args [][]byte) (ConfigGet, error) {
 	if len(args) < 1 {
 		return ConfigGet{}, redis.ErrInvalidArgNum
 	}
-	cmd := ConfigGet{params: make([]string, len(args))}
-	for i, arg := range args {
-		cmd.params[i] = string(arg)
+	cmd := ConfigGet{params: make([]string, 0, len(args))}
+	if len(args) == 1 {
+		cmd.params = append(cmd.params, strings.ToLower(string(args[0])))
+		return cmd, nil
+	}
+
+	seen := make(map[string]struct{}, len(args))
+	for _, arg := range args {
+		param := strings.ToLower(string(arg))
+		if _, ok := seen[param]; ok {
+			continue
+		}
+		seen[param] = struct{}{}
+		cmd.params = append(cmd.params, param)
 	}
 	return cmd, nil
 }
@@ -31,8 +43,8 @@ func (c ConfigGet) Run(w redis.Writer, red redis.Redka) (any, error) {
 		return false, nil
 	}
 
-	// Build response map of configuration parameters
-	infos := make(map[string]string)
+	// Build values in the same order as the deduplicated parameters.
+	infos := make(map[string]string, len(c.params))
 
 	for _, param := range c.params {
 		switch param {
@@ -68,7 +80,7 @@ func (c ConfigGet) Run(w redis.Writer, red redis.Redka) (any, error) {
 	}
 
 	// Write response as array of key-value pairs
-	w.WriteArray(len(infos) * 2)
+	w.WriteArray(len(c.params) * 2)
 	for _, param := range c.params {
 		w.WriteString(param)
 		w.WriteString(infos[param])
