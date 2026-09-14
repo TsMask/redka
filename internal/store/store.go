@@ -21,8 +21,23 @@ type Store struct {
 	writeCommitter *writeCommitter
 	inTx           bool          // true when DB is already a transaction
 	writeMu        *sync.RWMutex // gates destructive flush operations
-	cleanupTicker  *time.Ticker  // timer for periodic cleanup
-	cleanupStop    chan struct{} // channel to stop cleanup goroutine
+	lifecycle      *storeLifecycle
+}
+
+type storeLifecycle struct {
+	mu        sync.Mutex
+	cleanup   *cleanupLoop
+	closed    bool
+	closeOnce sync.Once
+	closeErr  error
+}
+
+type cleanupLoop struct {
+	mu      sync.Mutex
+	running bool
+	stopped bool
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 }
 
 // Open creates a new database handle from a DSN.
@@ -45,7 +60,9 @@ func Open(dsn string) (*Store, error) {
 		return nil, err
 	}
 	store.writeMu = &sync.RWMutex{}
+	store.lifecycle = &storeLifecycle{}
 	if err := store.Migrate(); err != nil {
+		_ = store.Close()
 		return nil, err
 	}
 	store.writeCommitter = newWriteCommitter(store)
@@ -100,25 +117,51 @@ func FromTx(dialect Dialect, db *gorm.DB) *Store {
 
 // Close closes the underlying sql.DB connection and stops the cleanup service.
 func (s *Store) Close() error {
-	if s.writeCommitter != nil {
-		s.writeCommitter.close()
-	}
-
-	// Stop the cleanup service
-	if s.cleanupStop != nil {
-		close(s.cleanupStop)
-		s.cleanupStop = nil
-		s.cleanupTicker = nil
-	}
-
-	// Close the database connection
-	if s.DB == nil {
+	if s.lifecycle == nil {
 		return nil
 	}
-	if sqlDB, err := s.DB.DB(); err == nil {
-		return sqlDB.Close()
+	s.lifecycle.close(s)
+	return s.lifecycle.closeErr
+}
+
+func (l *storeLifecycle) close(s *Store) {
+	l.closeOnce.Do(func() {
+		l.mu.Lock()
+		l.closed = true
+		cleanup := l.cleanup
+		l.mu.Unlock()
+
+		if cleanup != nil {
+			cleanup.stop()
+		}
+
+		if s.writeCommitter != nil {
+			s.writeCommitter.close()
+		}
+
+		// Close the database connection
+		if s.DB == nil {
+			return
+		}
+		if sqlDB, err := s.DB.DB(); err == nil {
+			l.closeErr = sqlDB.Close()
+		}
+	})
+}
+
+func (l *storeLifecycle) startCleanup(s *Store, interval time.Duration) {
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return
 	}
-	return nil
+	if l.cleanup == nil {
+		l.cleanup = &cleanupLoop{}
+	}
+	cleanup := l.cleanup
+	l.mu.Unlock()
+
+	cleanup.start(s, interval)
 }
 
 // Version returns the database server version string.
@@ -195,29 +238,67 @@ func (s *Store) CleanupExpiredKeys() (int, error) {
 
 // StartCleanupTicker starts a background goroutine that periodically cleans up
 // expired keys. The interval parameter controls how often cleanup runs.
-// This method starts the cleanup goroutine and stores the ticker/stop channel
-// in the Store struct. Call Close() to stop the cleanup service.
+// Calling Close() stops the service and waits for the goroutine to exit.
 func (s *Store) StartCleanupTicker(interval time.Duration) {
-	s.cleanupStop = make(chan struct{})
-	s.cleanupTicker = time.NewTicker(interval)
+	if s.lifecycle == nil {
+		return
+	}
+	s.lifecycle.startCleanup(s, interval)
+}
+
+func (c *cleanupLoop) start(s *Store, interval time.Duration) {
+	c.mu.Lock()
+	if c.running || c.stopped {
+		c.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	ticker := time.NewTicker(interval)
+	c.stopCh, c.doneCh = stopCh, doneCh
+	c.running = true
+	c.mu.Unlock()
 
 	go func() {
-		defer s.cleanupTicker.Stop()
+		defer func() {
+			ticker.Stop()
+			close(doneCh)
+		}()
 		for {
 			select {
-			case <-s.cleanupTicker.C:
+			case <-ticker.C:
 				deleted, err := s.CleanupExpiredKeys()
 				if err != nil {
 					slog.Warn("cleanup expired keys", "error", err)
 				} else if deleted > 0 {
 					slog.Info("cleanup expired keys", "deleted", deleted)
 				}
-			case <-s.cleanupStop:
+			case <-stopCh:
 				slog.Info("cleanup service stopped")
 				return
 			}
 		}
 	}()
+}
+
+func (c *cleanupLoop) stop() {
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		return
+	}
+	c.stopped = true
+	if !c.running {
+		c.mu.Unlock()
+		return
+	}
+	stopCh, doneCh := c.stopCh, c.doneCh
+	c.running = false
+	c.stopCh, c.doneCh = nil, nil
+	c.mu.Unlock()
+
+	close(stopCh)
+	<-doneCh
 }
 
 // gormConfig returns the GORM configuration.

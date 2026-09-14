@@ -48,18 +48,18 @@ func main() {
 	defer stop()
 
 	// Start application and debug servers.
-	ready := make(chan error, 1)
+	ready := make(chan error, 2)
 	srv := startServer(cfg, db, ready)
 	debugSrv := startDebugServer(cfg, ready)
 	if err := <-ready; err != nil {
 		slog.Error("startup", "error", err)
-		shutdown(srv, debugSrv)
+		shutdown(srv, debugSrv, db)
 		os.Exit(1)
 	}
 
 	// Wait for a shutdown signal.
 	<-ctx.Done()
-	shutdown(srv, debugSrv)
+	shutdown(srv, debugSrv, db)
 	slog.Info("redka stopped")
 }
 
@@ -77,9 +77,8 @@ func startServer(cfg *config.ServerConfig, db *store.Store, ready chan error) *s
 
 	// Start the server.
 	go func() {
-		if err := srv.Start(ready); err != nil {
-			ready <- fmt.Errorf("start redcon server: %w", err)
-		}
+		// Start reports the listen result on ready.
+		_ = srv.Start(ready)
 	}()
 
 	return srv
@@ -100,7 +99,7 @@ func startDebugServer(cfg *config.ServerConfig, ready chan<- error) *server.Debu
 }
 
 // shutdown stops the main server and the debug server.
-func shutdown(srv *server.Server, debugSrv *server.DebugServer) {
+func shutdown(srv *server.Server, debugSrv *server.DebugServer, db *store.Store) {
 	slog.Info("stopping redka")
 
 	// Stop the debug server.
@@ -113,5 +112,9 @@ func shutdown(srv *server.Server, debugSrv *server.DebugServer) {
 	// Stop the main server.
 	if err := srv.Stop(); err != nil {
 		slog.Error("stopping redcon server", "error", err)
+	}
+
+	if err := db.Close(); err != nil {
+		slog.Error("closing database", "error", err)
 	}
 }

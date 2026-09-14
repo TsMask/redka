@@ -3,12 +3,14 @@ package redka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +24,9 @@ type Server struct {
 	srv      *server.Server
 	debugSrv *server.DebugServer
 	db       *store.Store
+
+	stopOnce sync.Once
+	stopErrs []error
 }
 
 // parseAddress parses an address string and sets host/port in config.
@@ -48,36 +53,11 @@ func Start(addr string, dsn string) (*Server, error) {
 
 // StartWithConfig starts Redka server synchronously with custom config.
 func StartWithConfig(addr string, dsn string, cfg *config.ServerConfig) (*Server, error) {
-	if cfg == nil {
-		cfg = config.DefaultConfig()
-	}
-	parseAddress(addr, cfg)
-	cfg.DBDSN = dsn
-
-	config.LoggerConfig(cfg)
-
-	db, err := store.Open(cfg.DBDSN)
-	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
-	}
-	if _, err = db.CleanupExpiredKeys(); err != nil {
-		slog.Warn("cleanup expired keys on startup", "error", err)
-	}
-	db.StartCleanupTicker(time.Duration(cfg.CleanupInterval) * time.Second)
-
-	srv := server.NewWithConfig(cfg.Network(), cfg.Address(), db, cfg)
-
-	ready := make(chan error, 1)
-	go func() {
-		if err := srv.Start(ready); err != nil {
-			ready <- fmt.Errorf("start redcon server: %w", err)
-		}
-	}()
+	ready, srv := StartAsyncWithConfig(addr, dsn, cfg)
 	if err := <-ready; err != nil {
 		return nil, err
 	}
-
-	return &Server{db: db, srv: srv}, nil
+	return srv, nil
 }
 
 // StartAsync starts Redka server in a goroutine.
@@ -110,25 +90,45 @@ func StartAsyncWithConfig(addr string, dsn string, cfg *config.ServerConfig) (ch
 	db.StartCleanupTicker(time.Duration(cfg.CleanupInterval) * time.Second)
 
 	srv := server.NewWithConfig(cfg.Network(), cfg.Address(), db, cfg)
+	redkaServer := &Server{db: db, srv: srv}
 
+	started := make(chan error, 1)
 	go func() {
-		if err := srv.Start(ready); err != nil {
-			ready <- fmt.Errorf("start redcon server: %w", err)
+		// server.Start reports the listen result on started. It then serves
+		// on the same goroutine until the listener is closed.
+		_ = srv.Start(started)
+	}()
+	go func() {
+		err := <-started
+		if err != nil {
+			err = fmt.Errorf("start redcon server: %w", err)
+			if closeErr := redkaServer.stop(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("close server resources: %w", closeErr))
+			}
 		}
+		ready <- err
 	}()
 
-	return ready, &Server{db: db, srv: srv}
+	return ready, redkaServer
 }
 
 // Stop stops the Redka server.
 func (s *Server) Stop() error {
 	slog.Info("stopping redka")
+	return s.stop()
+}
 
-	if err := s.srv.Stop(); err != nil {
-		return fmt.Errorf("stop server: %w", err)
-	}
+func (s *Server) stop() error {
+	s.stopOnce.Do(func() {
+		if err := s.srv.Stop(); err != nil {
+			s.stopErrs = append(s.stopErrs, fmt.Errorf("stop server: %w", err))
+		}
+		if err := s.db.Close(); err != nil {
+			s.stopErrs = append(s.stopErrs, fmt.Errorf("close database: %w", err))
+		}
+	})
 
-	return nil
+	return errors.Join(s.stopErrs...)
 }
 
 // WaitForShutdown waits for shutdown signal (Ctrl+C or SIGTERM).

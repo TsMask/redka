@@ -2,8 +2,10 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -26,7 +28,19 @@ type Server struct {
 	addr string
 	srv  *redcon.Server
 	db   *store.Store
+
+	mu        sync.Mutex
+	state     serverState
+	serveDone chan struct{}
 }
+
+type serverState int
+
+const (
+	serverIdle serverState = iota
+	serverListening
+	serverStopped
+)
 
 // New creates a new Redka server with the given
 // network, address and database. Does not start the server.
@@ -104,26 +118,79 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 // is ready to accept connections, or an error if it fails to start.
 func (s *Server) Start(ready chan error) error {
 	slog.Info("redka started", "addr", s.addr)
-	err := s.srv.ListenServeAndSignal(ready)
+
+	s.mu.Lock()
+	if s.state != serverIdle {
+		err := errors.New("server is not idle")
+		if s.state == serverStopped {
+			err = errors.New("server is stopped")
+		}
+		s.mu.Unlock()
+		if ready != nil {
+			ready <- err
+		}
+		return err
+	}
+
+	ln, err := net.Listen(s.net, s.addr)
 	if err != nil {
+		s.mu.Unlock()
+		if ready != nil {
+			ready <- err
+		}
 		return fmt.Errorf("serve: %w", err)
+	}
+
+	done := make(chan struct{})
+	s.serveDone = done
+	s.state = serverListening
+	s.mu.Unlock()
+
+	if ready != nil {
+		ready <- nil
+	}
+
+	serveErr := s.srv.Serve(ln)
+	close(done)
+
+	s.mu.Lock()
+	if s.state == serverListening {
+		s.state = serverIdle
+	}
+	s.mu.Unlock()
+
+	if serveErr != nil {
+		return fmt.Errorf("serve: %w", serveErr)
 	}
 	return nil
 }
 
-// Stop stops the server and closes the database.
+// Stop stops the listener and waits for the serve loop to leave the database.
+// The caller that opened the database remains responsible for closing it.
 func (s *Server) Stop() error {
-	err := s.srv.Close()
+	s.mu.Lock()
+	if s.state == serverStopped {
+		s.mu.Unlock()
+		return nil
+	}
+
+	wasListening := s.state == serverListening
+	done := s.serveDone
+	s.state = serverStopped
+	s.serveDone = nil
+	s.mu.Unlock()
+
+	var err error
+	if wasListening {
+		err = s.srv.Close()
+		if done != nil {
+			<-done
+		}
+	}
+
+	slog.Info("redka stopped", "addr", s.addr)
 	if err != nil {
 		return fmt.Errorf("server close: %w", err)
 	}
-	slog.Info("redka stopped", "addr", s.addr)
-
-	err = s.db.Close()
-	if err != nil {
-		return fmt.Errorf("db close: %w", err)
-	}
-	slog.Debug("database closed")
-
 	return nil
 }

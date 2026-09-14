@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,5 +60,37 @@ func TestExclusiveTransactionWaitsForWriteCommitter(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("exclusive transaction did not finish after write batch")
+	}
+}
+
+func TestCloseConcurrentWithCleanupStartIsSafe(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				db.StartCleanupTicker(time.Hour)
+			} else {
+				_ = db.Close()
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("final close: %v", err)
+	}
+	sqlDB, err := db.DB.DB()
+	if err != nil {
+		t.Fatalf("get SQL handle: %v", err)
+	}
+	if err := sqlDB.Ping(); err == nil {
+		t.Fatal("database connection is still alive")
 	}
 }
