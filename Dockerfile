@@ -1,6 +1,6 @@
 FROM golang:1.25-alpine AS builder
 
-ARG VERSION=1.5.0
+ARG VERSION=1.5.1
 ARG COMMIT=none
 ARG DATE=unknown
 
@@ -36,9 +36,9 @@ ENTRYPOINT ["/usr/local/bin/redka"]
 CMD ["-c", "/usr/local/etc/redka/redka.yaml"]
 
 # Build the image
-# docker build --build-arg VERSION=1.5.0 --build-arg COMMIT=$(git rev-parse --short HEAD) --build-arg DATE=$(date -u '+%Y-%m-%dT%H:%M:%S') -t redka:1.5.0 .
-# docker run --rm -p 6380:6379 redka:1.5.0 -a hello1234
+# docker build --build-arg VERSION=1.5.1 --build-arg COMMIT=$(git rev-parse --short HEAD) --build-arg DATE=$(date -u '+%Y-%m-%dT%H:%M:%S') -t redka:1.5.1 .
+# docker run --rm -p 6380:6379 redka:1.5.1 -a hello1234
 
 # Image
-# docker save redka:1.5.0 -o build/redka_1.5.0-docker.tar
-# docker load -i redka_1.5.0-docker.tar
+# docker save redka:1.5.1 -o build/redka_1.5.1-docker.tar
+# docker load -i redka_1.5.1-docker.tar

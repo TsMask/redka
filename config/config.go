@@ -12,7 +12,7 @@ import (
 
 // set by the build process
 var (
-	Version = "1.5.0"
+	Version = "1.5.1"
 	Commit  = "none"
 	Date    = "unknown"
 )

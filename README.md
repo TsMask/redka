@@ -151,10 +151,10 @@ sudo bash scripts/test/test_set_commands.sh 6380 localhost password
 
 ```bash
 # 打包 Deb 包
-sudo bash scripts/build/build-deb.sh -v 1.5.0
+sudo bash scripts/build/build-deb.sh -v 1.5.1
 
 # 打包 RPM 包
-sudo bash scripts/build/build-rpm.sh -v 1.5.0
+sudo bash scripts/build/build-rpm.sh -v 1.5.1
 
 # 普通二进制
 make build

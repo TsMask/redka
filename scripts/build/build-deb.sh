@@ -3,7 +3,7 @@
 set -e
 export PATH=$PATH:/usr/local/go/bin
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 PKG_NAME="redka"
 
 while getopts "v:h" opt; do
@@ -170,4 +170,4 @@ dpkg-deb --build "${DEST_DIR}" "${PROJECT_DIR}/build/${PKG_OUTPUT}"
 rm -rf "${DEST_DIR}"
 
 echo "${PROJECT_DIR}/build/${PKG_OUTPUT}"
-# sudo bash scripts/build/build-deb.sh -v 1.5.0
+# sudo bash scripts/build/build-deb.sh -v 1.5.1
