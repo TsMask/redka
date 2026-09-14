@@ -61,9 +61,25 @@ Redka 支持命令行参数和 YAML 配置文件。
 | `-p` | 监听端口 | `6379` |
 | `-s` | Unix socket 路径（覆盖 host 和 port） | 无 |
 | `-a` | 认证密码 | 无 |
-| `-c` | 配置文件路径（会被命令行参数覆盖） | 无 [配置文件示例](./scripts/build/redka.yaml) |
-| `-v` | 启用详细日志和性能分析端点 | `false` |
-| `db-dsn` | 数据库连接字符串 | `file:/tmp/redka.sqlite?vfs=memdb` |
+| `-c` | 配置文件路径（会被命令行参数覆盖） | `/usr/local/etc/redka/redka.yaml` [配置文件示例](./scripts/build/redka.yaml) |
+| `-v` | 启用详细日志，并在 `{host}:6360` 启用 pprof | `false` |
+| `db-dsn` | 数据库连接字符串 | `:memory:` |
+
+### 配置优先级
+
+配置按以下顺序解析，右侧优先级更高：
+
+```text
+defaults -> environment -> YAML file -> command line
+```
+
+未指定 `-c` 时固定加载 `/usr/local/etc/redka/redka.yaml`；该路径不由环境变量控制。本地源码运行如果该文件不存在，请显式指定 `-c scripts/build/redka.yaml`。
+
+环境变量支持 `REDKA_HOST`、`REDKA_PORT`、`REDKA_SOCK`、
+`REDKA_DB_DSN`、`REDKA_PASSWORD`、`REDKA_DATABASES`、`REDKA_MAX_CLIENTS`、
+`REDKA_SLOWLOG_MAX_LEN`、`REDKA_SLOWLOG_THRESHOLD`、`REDKA_CLEANUP_INTERVAL`、
+`REDKA_VERBOSE` 和 `REDKA_LOG_FILE`。YAML 中显式配置的字段会覆盖环境变量；
+YAML 省略的字段保留默认值或环境变量值；显式 CLI 参数最终覆盖文件配置。
 
 ### DSN 格式说明
 
@@ -80,6 +96,29 @@ Redka 使用 GORM 作为 ORM，支持三种关系型数据库后端：
 - **SQLite**: 轻量级，进程内存储，适合开发和测试
 - **PostgreSQL**: 功能强大的开源数据库，适合生产环境
 - **MySQL**: 广泛使用的关系型数据库，支持 MariaDB
+
+## Docker 部署
+
+镜像使用两阶段构建：builder 只复制构建所需源码，runtime 使用 Alpine 并安装 CA 证书，保留 shell 便于部署排查。镜像工作目录为 `/usr/local/etc/redka`，默认使用打包的示例配置启动内存 SQLite；镜像内不额外设置用户。生产配置应在运行时只读挂载。
+
+```bash
+docker build --build-arg VERSION=1.5.1 \
+  --build-arg COMMIT="$(git rev-parse --short HEAD)" \
+  --build-arg DATE="$(date -u '+%Y-%m-%dT%H:%M:%S')" \
+  -t redka:1.5.1 .
+
+docker run --rm --publish 6380:6379 redka:1.5.1
+```
+
+如需替换默认配置：
+
+```bash
+docker run --rm --publish 6380:6379 \
+  --volume "$PWD/redka.yaml:/etc/redka/redka.yaml:ro" \
+  redka:1.5.1 -c /etc/redka/redka.yaml
+```
+
+如需使用文件 SQLite 或本地 Unix socket，相关路径必须对容器运行用户可写。镜像声明了 `6360/tcp`，但 pprof 只在 `verbose` 开启时监听 `{host}:6360`；端口仍需显式 `--publish` 才能被宿主机访问。
 
 ## 性能
 

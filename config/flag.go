@@ -2,51 +2,43 @@
 package config
 
 import (
-	"cmp"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
 )
 
-// FlagConfig reads the configuration from
-// command line arguments and environment variables.
-func FlagConfig() *ServerConfig {
-	// Start with default config
-	cfg := DefaultConfig()
-	var portStr string
-	var configFile string
-	var hostFlag, portFlag, sockFlag, passwordFlag bool
-	var positionalDSN string
+type commandLine struct {
+	configFile string
+	host       string
+	port       string
+	sock       string
+	password   string
+	verbose    bool
+	dbDSN      string
+	set        map[string]bool
+}
 
-	// Track which flags were explicitly set
-	flag.StringVar(
-		&cfg.Host, "h",
-		cmp.Or(os.Getenv("REDKA_HOST"), "0.0.0.0"),
-		"server host",
-	)
-	flag.StringVar(
-		&portStr, "p",
-		cmp.Or(os.Getenv("REDKA_PORT"), "6379"),
-		"server port",
-	)
-	flag.StringVar(
-		&cfg.Sock, "s",
-		cmp.Or(os.Getenv("REDKA_SOCK"), ""),
-		"server socket (overrides host and port)",
-	)
-	flag.StringVar(
-		&cfg.Password, "a",
-		cmp.Or(os.Getenv("REDKA_PASSWORD"), ""),
-		"require clients to authenticate with this password",
-	)
-	flag.StringVar(
-		&configFile, "c",
-		"",
-		"configuration file path (YAML format)",
-	)
-	flag.BoolVar(&cfg.Verbose, "v", false, "verbose logging")
+// DefaultConfigFile is always loaded when -c is omitted. Package and container
+// installs release their configuration at this path.
+const DefaultConfigFile = "/usr/local/etc/redka/redka.yaml"
+
+// FlagConfig resolves configuration in this order:
+// defaults, environment, YAML file, then explicit command-line arguments.
+func FlagConfig() *ServerConfig {
+	cfg := DefaultConfig()
+	if err := applyEnvironment(cfg); err != nil {
+		slog.Error("Invalid environment configuration", "error", err)
+		os.Exit(1)
+	}
+
+	cli := &commandLine{set: make(map[string]bool)}
+	registerFlags(flag.CommandLine, cli, cfg)
 	flag.Parse()
+	flag.Visit(func(f *flag.Flag) {
+		cli.set[f.Name] = true
+	})
 
 	args := flag.Args()
 	if len(args) > 1 {
@@ -54,89 +46,113 @@ func FlagConfig() *ServerConfig {
 		os.Exit(1)
 	}
 	if len(args) == 1 {
-		positionalDSN = args[0]
+		cli.dbDSN = args[0]
+		cli.set["db-dsn"] = true
 	}
 
-	// Track which flags were explicitly set via command line
-	flag.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "h":
-			hostFlag = true
-		case "p":
-			portFlag = true
-		case "s":
-			sockFlag = true
-		case "a":
-			passwordFlag = true
-		}
-	})
-
-	// Load configuration from file if specified
-	if configFile != "" {
-		fileConfig, err := Load(configFile)
-		if err != nil {
-			slog.Error("Failed to load config file", "error", err)
+	if cli.configFile != "" {
+		if err := applyFile(cfg, cli.configFile); err != nil {
+			slog.Error("Failed to load config file", "error", err, "file", cli.configFile)
 			os.Exit(1)
 		}
-		cfg = fileConfig
+		cfg.ConfigFile = cli.configFile
 	}
-
-	if positionalDSN != "" {
-		cfg.DBDSN = positionalDSN
+	if err := applyCommandLine(cfg, cli); err != nil {
+		slog.Error("Invalid command-line configuration", "error", err)
+		os.Exit(1)
 	}
-
-	// Command line arguments override file config and environment variables
-	if hostFlag {
-		// Get the actual value from flag
-		flag.Visit(func(f *flag.Flag) {
-			if f.Name == "h" {
-				cfg.Host = f.Value.String()
-			}
-		})
-	}
-
-	if portFlag {
-		flag.Visit(func(f *flag.Flag) {
-			if f.Name == "p" {
-				cfg.Port = parsePortOrExit(f.Value.String())
-			}
-		})
-	}
-
-	if sockFlag {
-		flag.Visit(func(f *flag.Flag) {
-			if f.Name == "s" {
-				cfg.Sock = f.Value.String()
-			}
-		})
-	}
-
-	if passwordFlag {
-		flag.Visit(func(f *flag.Flag) {
-			if f.Name == "a" {
-				cfg.Password = f.Value.String()
-			}
-		})
-	} else if v := os.Getenv("REDKA_PASSWORD"); v != "" {
-		cfg.Password = v
-	}
-
-	// Validate final config
 	if err := cfg.Validate(); err != nil {
 		slog.Error("Invalid configuration", "error", err)
 		os.Exit(1)
 	}
-
 	return cfg
 }
 
-// parsePortOrExit parses a port string to an integer.
-// If the port is invalid, it exits the program with an error message.
-func parsePortOrExit(v string) int {
-	port, err := strconv.Atoi(v)
-	if err != nil {
-		slog.Error("Invalid port", "value", v, "error", err)
-		os.Exit(1)
+func registerFlags(fs *flag.FlagSet, cli *commandLine, cfg *ServerConfig) {
+	fs.StringVar(&cli.configFile, "c", DefaultConfigFile, "configuration file path (YAML format)")
+	fs.StringVar(&cli.host, "h", cfg.Host, "server host")
+	fs.StringVar(&cli.port, "p", strconv.Itoa(cfg.Port), "server port")
+	fs.StringVar(&cli.sock, "s", cfg.Sock, "server socket (overrides host and port)")
+	fs.StringVar(&cli.password, "a", cfg.Password, "require clients to authenticate with this password")
+	fs.BoolVar(&cli.verbose, "v", cfg.Verbose, "verbose logging and pprof")
+}
+
+func applyCommandLine(cfg *ServerConfig, cli *commandLine) error {
+	if cli.set["h"] {
+		cfg.Host = cli.host
 	}
-	return port
+	if cli.set["p"] {
+		port, err := parsePort(cli.port)
+		if err != nil {
+			return err
+		}
+		cfg.Port = port
+	}
+	if cli.set["s"] {
+		cfg.Sock = cli.sock
+	}
+	if cli.set["a"] {
+		cfg.Password = cli.password
+	}
+	if cli.set["v"] {
+		cfg.Verbose = cli.verbose
+	}
+	if cli.set["db-dsn"] && cli.dbDSN != "" {
+		cfg.DBDSN = cli.dbDSN
+	}
+	return nil
+}
+
+func applyEnvironment(cfg *ServerConfig) error {
+	applyStringEnv("REDKA_HOST", &cfg.Host)
+	applyStringEnv("REDKA_SOCK", &cfg.Sock)
+	applyStringEnv("REDKA_DB_DSN", &cfg.DBDSN)
+	applyStringEnv("REDKA_PASSWORD", &cfg.Password)
+	applyStringEnv("REDKA_LOG_FILE", &cfg.LogFile)
+
+	ints := []struct {
+		name   string
+		target *int
+	}{
+		{name: "REDKA_PORT", target: &cfg.Port},
+		{name: "REDKA_DATABASES", target: &cfg.Databases},
+		{name: "REDKA_MAX_CLIENTS", target: &cfg.MaxClients},
+		{name: "REDKA_SLOWLOG_MAX_LEN", target: &cfg.SlowlogMaxLen},
+		{name: "REDKA_SLOWLOG_THRESHOLD", target: &cfg.SlowlogThreshold},
+		{name: "REDKA_CLEANUP_INTERVAL", target: &cfg.CleanupInterval},
+	}
+	for _, item := range ints {
+		value := os.Getenv(item.name)
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", item.name, err)
+		}
+		*item.target = parsed
+	}
+
+	if value := os.Getenv("REDKA_VERBOSE"); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("REDKA_VERBOSE: %w", err)
+		}
+		cfg.Verbose = parsed
+	}
+	return nil
+}
+
+func applyStringEnv(name string, target *string) {
+	if value := os.Getenv(name); value != "" {
+		*target = value
+	}
+}
+
+func parsePort(value string) (int, error) {
+	port, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid port %q: %w", value, err)
+	}
+	return port, nil
 }

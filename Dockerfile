@@ -6,39 +6,48 @@ ARG DATE=unknown
 
 WORKDIR /redka
 
-COPY . .
+COPY go.mod go.sum ./
 RUN go mod download
 
-# Build the application
-RUN go build \
+COPY cmd ./cmd
+COPY config ./config
+COPY internal ./internal
+COPY server ./server
+RUN CGO_ENABLED=0 go build \
     -ldflags "-s -w \
-       	-X github.com/tsmask/redka/config.Version=${VERSION} \
-       	-X github.com/tsmask/redka/config.Commit=${COMMIT} \
-       	-X github.com/tsmask/redka/config.Date=${DATE}" \
-    -trimpath -o build/redka cmd/redka/main.go
+        -X github.com/tsmask/redka/config.Version=${VERSION} \
+        -X github.com/tsmask/redka/config.Commit=${COMMIT} \
+        -X github.com/tsmask/redka/config.Date=${DATE}" \
+    -trimpath -o /out/redka ./cmd/redka
 
-# Final stage
 FROM alpine:3.21 AS runtime
 
-RUN apk add --no-cache ca-certificates && mkdir -p /usr/local/etc/redka /var/log
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /usr/local/etc/redka
 
-COPY --from=builder /redka/build/redka /usr/local/bin/redka
-COPY --from=builder /redka/scripts/build/redka.yaml /usr/local/etc/redka/redka.yaml
-COPY --from=builder /redka/LICENSE /usr/share/licenses/redka/LICENSE
-COPY --from=builder /redka/NOTICE /usr/share/licenses/redka/NOTICE
-COPY --from=builder /redka/THIRD_PARTY_LICENSES.md /usr/share/licenses/redka/THIRD_PARTY_LICENSES.md
+COPY --from=builder /out/redka /usr/local/bin/redka
+COPY scripts/build/redka.yaml /usr/local/etc/redka/redka.yaml
+COPY LICENSE /usr/share/licenses/redka/LICENSE
+COPY NOTICE /usr/share/licenses/redka/NOTICE
+COPY THIRD_PARTY_LICENSES.md /usr/share/licenses/redka/THIRD_PARTY_LICENSES.md
 
-EXPOSE 6379/tcp
+EXPOSE 6379/tcp 6360/tcp
 
 ENTRYPOINT ["/usr/local/bin/redka"]
-CMD ["-c", "/usr/local/etc/redka/redka.yaml"]
+CMD []
 
-# Build the image
-# docker build --build-arg VERSION=1.5.1 --build-arg COMMIT=$(git rev-parse --short HEAD) --build-arg DATE=$(date -u '+%Y-%m-%dT%H:%M:%S') -t redka:1.5.1 .
-# docker run --rm -p 6380:6379 redka:1.5.1 -a hello1234
-
-# Image
-# docker save redka:1.5.1 -o build/redka_1.5.1-docker.tar
-# docker load -i redka_1.5.1-docker.tar
+# Build:
+# docker build --build-arg VERSION=1.5.1 \
+#   --build-arg COMMIT=$(git rev-parse --short HEAD) \
+#   --build-arg DATE=$(date -u '+%Y-%m-%dT%H:%M:%S') \
+#   -t redka:1.5.1 .
+#
+# Run with the built-in default configuration:
+# docker run --rm -p 6380:6379 \
+#   redka:1.5.1
+#
+# Or run with a mounted configuration file:
+# docker run --rm -p 6380:6379 \
+#   -v "$PWD/redka.yaml:/etc/redka/redka.yaml:ro" \
+#   redka:1.5.1 -c /etc/redka/redka.yaml

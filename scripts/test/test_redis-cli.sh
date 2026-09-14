@@ -115,25 +115,67 @@ assert_pattern() {
     fi
 }
 
-assert_any() {
-    local desc="$1"
-    local cmd
-    if [[ "$2" == "OK" || "$2" == "(integer)"* || "$2" =~ ^-?[0-9]+$ ]]; then
-        cmd="$3"
-    else
-        cmd="$2"
-    fi
-    [ -n "$cmd" ] && COVERED_COMMANDS["${cmd,,}"]=1
-    shift
+assert_one_of() {
+    local desc="$1" expected="$2"
+    shift 2
+    mark_covered "$1"
     local actual
     actual=$($CLI "$@" 2>/dev/null | tr -d '\0')
-    if echo "$actual" | grep -q "^ERR "; then
+    local candidate
+    local matched=false
+    IFS='|' read -ra candidates <<< "$expected"
+    for candidate in "${candidates[@]}"; do
+        if [[ "$actual" == "$candidate" ]]; then
+            matched=true
+            break
+        fi
+    done
+    if [[ "$matched" == true ]]; then
+        PASS_COUNT=$((PASS_COUNT + 1))
+        printf "  \033[32mPASS\033[0m %s (actual='%s')\n" "$desc" "$actual"
+    else
         FAIL_COUNT=$((FAIL_COUNT + 1))
         printf "  \033[31mFAIL\033[0m %s\n" "$desc"
+        printf "    Expected one of: '%s'\n" "$expected"
         printf "    Actual:   '%s'\n" "$actual"
-    else
+    fi
+}
+
+assert_unordered() {
+    local desc="$1" expected="$2"
+    shift 2
+    mark_covered "$1"
+    local actual normalized
+    actual=$($CLI "$@" 2>/dev/null | tr -d '\0' | sort)
+    normalized=$(printf '%s\n' "$expected" | sort)
+    if [[ "$actual" == "$normalized" ]]; then
         PASS_COUNT=$((PASS_COUNT + 1))
         printf "  \033[32mPASS\033[0m %s\n" "$desc"
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        printf "  \033[31mFAIL\033[0m %s\n" "$desc"
+        printf "    Expected unordered lines:\n%s\n" "$normalized"
+        printf "    Actual unordered lines:\n%s\n" "$actual"
+    fi
+}
+
+assert_scan() {
+    local desc="$1" expected_items="$2"
+    shift 2
+    mark_covered "$1"
+    local raw cursor actual_items expected_sorted
+    raw=$($CLI "$@" 2>/dev/null | tr -d '\0')
+    cursor=$(printf '%s\n' "$raw" | head -n 1)
+    actual_items=$(printf '%s\n' "$raw" | tail -n +2 | sort)
+    expected_sorted=$(printf '%s\n' "$expected_items" | tr ' ' '\n' | sort)
+    if [[ "$cursor" =~ ^[0-9]+$ && "$actual_items" == "$expected_sorted" ]]; then
+        PASS_COUNT=$((PASS_COUNT + 1))
+        printf "  \033[32mPASS\033[0m %s (cursor=%s)\n" "$desc" "$cursor"
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        printf "  \033[31mFAIL\033[0m %s\n" "$desc"
+        printf "    Expected numeric cursor and items:\n%s\n" "$expected_sorted"
+        printf "    Actual:\n%s\n" "$raw"
     fi
 }
 
@@ -210,15 +252,16 @@ assert_eq  "SELECT 1"                    "OK"                SELECT 1
 assert_eq  "SELECT 0"                    "OK"                SELECT 0
 assert_int "DBSIZE (空库)"               "0"                 DBSIZE
 assert_eq  "COMMAND"                     "OK"                COMMAND
-assert_any "CONFIG GET"                                      CONFIG get requirepass
+assert_eq  "CONFIG GET"                                      $'requirepass\n********' CONFIG get requirepass
 assert_eq  "CONFIG SET slowlog threshold"          "OK"              CONFIG SET slowlog-log-slower-than 250
 assert_config_get_value "CONFIG GET slowlog threshold" "slowlog-log-slower-than" "250"
 assert_eq  "CONFIG SET slowlog max length"         "OK"              CONFIG SET slowlog-max-len 128
 assert_config_get_value "CONFIG GET slowlog max length" "slowlog-max-len" "128"
 assert_pattern "CONFIG SET unsupported parameter"  "ERR Unsupported CONFIG parameter: requirepass" CONFIG SET requirepass secret
 assert_eq  "CONFIG SET restore slowlog threshold"  "OK"              CONFIG SET slowlog-log-slower-than 1500000
-assert_any "INFO"                                            INFO
-assert_any "LOLWUT"                                          LOLWUT
+assert_pattern "INFO contains server section"     "^# Server[[:space:]]?$" INFO
+assert_pattern "INFO contains Redis version"      "^redis_version:[0-9]" INFO
+assert_eq "LOLWUT"                               "Ask me a question (⊃｡•́‿•̀｡)⊃" LOLWUT
 assert_eq  "FLUSHALL"                    "OK"                FLUSHALL
 
 section "2. String 命令"
@@ -248,7 +291,7 @@ assert_eq  "GETSET str3"                 "oldval"            GETSET str3 newval
 assert_eq  "GET str3 更新"               "newval"            GET str3
 
 assert_eq  "MSET"                        "OK"                MSET k1 v1 k2 v2 k3 v3
-assert_pattern "MGET"                    "v1|v2|v3"          MGET k1 k2 k3
+assert_eq "MGET"                          $'v1\nv2\nv3'       MGET k1 k2 k3
 
 assert_eq  "SET counter"                 "OK"                SET counter 10
 assert_int "INCR counter"                "11"                INCR counter
@@ -258,7 +301,7 @@ assert_int "DECRBY counter 2"            "13"                DECRBY counter 2
 assert_eq  "INCRBYFLOAT counter 2.5"     "15.5"              INCRBYFLOAT counter 2.5
 
 assert_int "SETRANGE srg 2 xyz"          "5"                 SETRANGE srg 2 xyz
-assert_pattern "GET srg"                 "xyz"               GET srg
+assert_eq "GET srg"                       "xyz"               GET srg
 
 section "3. Hash 命令"
 assert_int "HSET user1 name"             "1"                 HSET user1 name Alice
@@ -267,19 +310,19 @@ assert_int "HSET user1 email"            "1"                 HSET user1 email al
 assert_eq  "HGET user1 name"             "Alice"             HGET user1 name
 assert_int "HLEN user1"                  "3"                 HLEN user1
 assert_int "HEXISTS user1 name"          "1"                 HEXISTS user1 name
-assert_pattern "HKEYS user1"             "name|age|email"    HKEYS user1
-assert_pattern "HVALS user1"             "Alice|30"          HVALS user1
+assert_unordered "HKEYS user1"           $'name\nage\nemail' HKEYS user1
+assert_unordered "HVALS user1"           $'Alice\n30\nalice@test.com' HVALS user1
 assert_int "HSETNX user1 name (已存在)"  "0"                 HSETNX user1 name Bob
 assert_int "HSETNX user1 phone"          "1"                 HSETNX user1 phone 123456
 assert_eq  "HMSET user2"                 "OK"                HMSET user2 name Charlie age 25 email charlie@test.com
-assert_pattern "HMGET user2"             "Charlie|25"        HMGET user2 name age email
+assert_eq "HMGET user2"                   $'Charlie\n25\ncharlie@test.com' HMGET user2 name age email
 assert_int "HDEL user2 email"            "1"                 HDEL user2 email
-assert_pattern "HGETALL user2"           "name|Charlie|age|25" HGETALL user2
+assert_unordered "HGETALL user2"         $'name\nCharlie\nage\n25' HGETALL user2
 assert_int "HINCRBY user1 age 5"         "35"                HINCRBY user1 age 5
 assert_eq  "HINCRBYFLOAT user1 age 0.5"  "35.5"              HINCRBYFLOAT user1 age 0.5
 assert_int "HSTRLEN user1 name"          "5"                 HSTRLEN user1 name
-assert_any "HRANDFIELD user1"                                HRANDFIELD user1
-assert_any "HSCAN user1"                                     HSCAN user1 0
+assert_one_of "HRANDFIELD user1"          "name|age|email|phone" HRANDFIELD user1
+assert_scan "HSCAN user1"                 "name Alice age 35.5 email alice@test.com phone 123456" HSCAN user1 0
 
 section "4. List 命令"
 assert_int "LPUSH mylist a"              "1"                 LPUSH mylist a
@@ -287,11 +330,11 @@ assert_int "LPUSH mylist b"              "2"                 LPUSH mylist b
 assert_int "RPUSH mylist c"              "3"                 RPUSH mylist c
 assert_int "RPUSH mylist d"              "4"                 RPUSH mylist d
 assert_int "LLEN mylist"                 "4"                 LLEN mylist
-assert_pattern "LRANGE mylist 0 -1"      "b|a|c|d"           LRANGE mylist 0 -1
+assert_eq "LRANGE mylist 0 -1"            $'b\na\nc\nd'       LRANGE mylist 0 -1
 assert_int "LPUSH multi a b c"           "3"                 LPUSH orderlist a b c
-assert_pattern "LPUSH multi order"       "c|b|a"             LRANGE orderlist 0 -1
+assert_eq "LPUSH multi order"             $'c\nb\na'          LRANGE orderlist 0 -1
 assert_int "RPUSH multi x y"             "5"                 RPUSH orderlist x y
-assert_pattern "RPUSH multi order"       "c|b|a|x|y"         LRANGE orderlist 0 -1
+assert_eq "RPUSH multi order"             $'c\nb\na\nx\ny'    LRANGE orderlist 0 -1
 assert_eq  "LINDEX mylist 0"             "b"                 LINDEX mylist 0
 assert_eq  "LSET mylist 1"               "OK"                LSET mylist 1 updated
 assert_int "LINSERT before c"            "5"                 LINSERT mylist before c inserted
@@ -309,28 +352,29 @@ assert_int "SADD myset b"                "1"                 SADD myset b
 assert_int "SADD myset c"                "1"                 SADD myset c
 assert_int "SADD myset d"                "1"                 SADD myset d
 assert_int "SCARD myset"                 "4"                 SCARD myset
-# 已知 Redka bug: SISMEMBER 返回 invalid value type
-assert_any "SISMEMBER myset a (known bug)"                    SISMEMBER myset a
-assert_any "SISMEMBER myset z (known bug)"                    SISMEMBER myset z
+assert_int "SISMEMBER myset a"            "1"                 SISMEMBER myset a
+assert_int "SISMEMBER myset z"            "0"                 SISMEMBER myset z
 assert_int "SREM myset d"                "1"                 SREM myset d
-assert_pattern "SMEMBERS myset"          "a|b|c"             SMEMBERS myset
+assert_unordered "SMEMBERS myset"        $'a\nb\nc'          SMEMBERS myset
 
 assert_int "SADD set1"                   "3"                 SADD set1 a b c
 assert_int "SADD set2"                   "3"                 SADD set2 b c d
-assert_pattern "SINTER"                  "b|c"               SINTER set1 set2
-assert_pattern "SUNION"                  "a|b|c|d"           SUNION set1 set2
-assert_pattern "SDIFF"                   "a"                 SDIFF set1 set2
+assert_unordered "SINTER"                $'b\nc'             SINTER set1 set2
+assert_unordered "SUNION"                $'a\nb\nc\nd'       SUNION set1 set2
+assert_unordered "SDIFF"                 "a"                 SDIFF set1 set2
 assert_int "SINTERCARD"                  "2"                 SINTERCARD 2 set1 set2
-assert_pattern "SMISMEMBER"              "1|0"               SMISMEMBER set1 a z
+assert_eq "SMISMEMBER"                    $'1\n0'            SMISMEMBER set1 a z
 
 assert_int "SINTERSTORE rset"            "2"                 SINTERSTORE rset set1 set2
 assert_int "SUNIONSTORE uset"            "4"                 SUNIONSTORE uset set1 set2
 assert_int "SDIFFSTORE dset"             "1"                 SDIFFSTORE dset set1 set2
 assert_int "SADD movetest"               "3"                 SADD movetest x y z
 assert_int "SMOVE x -> myset"            "1"                 SMOVE movetest myset x
-assert_any "SPOP myset"                                      SPOP myset
-assert_any "SRANDMEMBER myset"                               SRANDMEMBER myset
-assert_any "SSCAN myset"                                     SSCAN myset 0
+assert_int "SADD single-pop set"          "1"                 SADD single-pop a
+assert_eq  "SPOP single-pop set"          "a"                 SPOP single-pop
+assert_int "SCARD single-pop set"         "0"                 SCARD single-pop
+assert_one_of "SRANDMEMBER myset"         "a|b|c|x"          SRANDMEMBER myset
+assert_scan "SSCAN myset"                 "a b c x"          SSCAN myset 0
 
 section "6. Sorted Set 命令"
 assert_int "ZADD zset1 1 one"            "1"                 ZADD zset1 1 one
@@ -342,25 +386,24 @@ assert_int "ZCARD zset1"                 "5"                 ZCARD zset1
 assert_eq  "ZSCORE one"                  "1"                 ZSCORE zset1 one
 assert_int "ZRANK three"                 "2"                 ZRANK zset1 three
 assert_int "ZREVRANK one"                "4"                 ZREVRANK zset1 one
-assert_pattern "ZRANGE 0 2"              "one|two|three"     ZRANGE zset1 0 2
-assert_pattern "ZREVRANGE 0 2"           "five|four|three"   ZREVRANGE zset1 0 2
-assert_pattern "ZRANGEBYSCORE 2 4"       "two|three|four"    ZRANGEBYSCORE zset1 2 4
-# 已知限制: ZREVRANGEBYSCORE 返回空或不完整
-assert_any "ZREVRANGEBYSCORE (known limit)"                   ZREVRANGEBYSCORE zset1 4 2
+assert_eq "ZRANGE 0 2"                    $'one\ntwo\nthree' ZRANGE zset1 0 2
+assert_eq "ZREVRANGE 0 2"                 $'five\nfour\nthree' ZREVRANGE zset1 0 2
+assert_eq "ZRANGEBYSCORE 2 4"             $'two\nthree\nfour' ZRANGEBYSCORE zset1 2 4
+assert_eq "ZREVRANGEBYSCORE 4 2"          $'four\nthree\ntwo' ZREVRANGEBYSCORE zset1 4 2
 assert_int "ZCOUNT 2 4"                  "3"                 ZCOUNT zset1 2 4
 assert_eq  "ZINCRBY one +10"             "11"                ZINCRBY zset1 10 one
 assert_int "ZREM one"                    "1"                 ZREM zset1 one
 
 assert_int "ZADD zset2"                  "3"                 ZADD zset2 1 a 2 b 3 c
 assert_int "ZADD zset3"                  "3"                 ZADD zset3 2 b 3 c 4 d
-assert_pattern "ZINTER"                  "b|c"               ZINTER 2 zset2 zset3
-assert_pattern "ZUNION"                  "a|b|c|d"           ZUNION 2 zset2 zset3
+assert_unordered "ZINTER"                $'b\nc'             ZINTER 2 zset2 zset3
+assert_unordered "ZUNION"                $'a\nb\nc\nd'       ZUNION 2 zset2 zset3
 assert_int "ZINTERSTORE zresult"         "2"                 ZINTERSTORE zresult 2 zset2 zset3
 assert_int "ZUNIONSTORE zuresult"        "4"                 ZUNIONSTORE zuresult 2 zset2 zset3
 assert_int "ZADD remtest"                "4"                 ZADD remtest 1 a 2 b 3 c 4 d
 assert_int "ZREMRANGEBYRANK 0 0"         "1"                 ZREMRANGEBYRANK remtest 0 0
-assert_any "ZREMRANGEBYSCORE 2 3"                            ZREMRANGEBYSCORE remtest 2 3
-assert_any "ZSCAN zset1"                                     ZSCAN zset1 0
+assert_int "ZREMRANGEBYSCORE 2 3"         "2"                ZREMRANGEBYSCORE remtest 2 3
+assert_scan "ZSCAN zset1"                 "two 2 three 3 four 4 five 5" ZSCAN zset1 0
 
 section "7. Key 命令"
 assert_eq  "SET mykey"                   "OK"                SET mykey hello
@@ -368,7 +411,7 @@ assert_eq  "TYPE mykey"                  "string"            TYPE mykey
 assert_int "EXISTS mykey"                "1"                 EXISTS mykey
 assert_int "EXISTS nonexist"             "0"                 EXISTS nonexist
 assert_int "HSET hkey"                   "1"                 HSET hkey f1 v1
-assert_pattern "KEYS my*"                "mykey"             KEYS "my*"
+assert_eq "KEYS exact key"                "mykey"            KEYS "mykey"
 
 assert_eq  "SET renamekey val"           "OK"                SET renamekey val
 assert_eq  "RENAME renamekey"            "OK"                RENAME renamekey newname
@@ -394,10 +437,11 @@ assert_eq  "SET pexpat pval"             "OK"                SET pexpat pval
 assert_int "PEXPIREAT pexpat 4102444800000" "1"              PEXPIREAT pexpat 4102444800000
 assert_ttl "TTL pexpat"                  1000000000 9999999999 TTL pexpat
 
+assert_eq "FLUSHDB before RANDOMKEY"     "OK"                FLUSHDB
 assert_eq  "SET randkey1"                "OK"                SET randkey1 a
 assert_eq  "SET randkey2"                "OK"                SET randkey2 b
-assert_any "RANDOMKEY"                                       RANDOMKEY
-assert_any "SCAN"                                            SCAN 0
+assert_one_of "RANDOMKEY"                "randkey1|randkey2" RANDOMKEY
+assert_scan "SCAN benchmark keys"        "randkey1 randkey2" SCAN 0 MATCH randkey* COUNT 100
 assert_eq  "FLUSHDB"                     "OK"                FLUSHDB
 assert_int "DBSIZE 最终"                 "0"                 DBSIZE
 

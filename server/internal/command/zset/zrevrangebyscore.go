@@ -11,8 +11,8 @@ import (
 type ZRevRangeByScore struct {
 	redis.BaseCmd
 	key        string
-	min        float64
 	max        float64
+	min        float64
 	withScores bool
 	offset     int
 	count      int
@@ -34,7 +34,7 @@ func ParseZRevRangeByScore(b redis.BaseCmd) (ZRevRangeByScore, error) {
 }
 
 func (cmd ZRevRangeByScore) Run(w redis.Writer, red redis.Redka) (any, error) {
-	rang := red.ZSet().RangeWith(cmd.key).ByScore(cmd.min, cmd.max).Desc()
+	rang := red.ZSet().RangeWith(cmd.key).ByScore(cmd.max, cmd.min).Desc()
 
 	// limit and offset
 	if cmd.offset > 0 {

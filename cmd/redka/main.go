@@ -89,7 +89,7 @@ func startDebugServer(cfg *config.ServerConfig, ready chan<- error) *server.Debu
 	if !cfg.Verbose {
 		return nil
 	}
-	srv := server.NewDebug("localhost", 6060)
+	srv := server.NewDebug(cfg.Host, 6360)
 	go func() {
 		if err := srv.Start(); err != nil {
 			ready <- fmt.Errorf("start debug pprof server: %w", err)

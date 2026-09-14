@@ -1,6 +1,18 @@
-.dockerignore
-.git
-.gitignore
-.vscode/
-redka
-Dockerfile
+# Allowlist the build context. New local reports, credentials, databases, and
+# test artifacts are excluded by default rather than needing a new deny rule.
+*
+!go.mod
+!go.sum
+!cmd
+!cmd/**
+!config
+!config/**
+!internal
+!internal/**
+!server
+!server/**
+!scripts/build/redka.yaml
+!LICENSE
+!NOTICE
+!THIRD_PARTY_LICENSES.md
+**/*_test.go

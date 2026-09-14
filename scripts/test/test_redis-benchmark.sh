@@ -31,7 +31,7 @@ for tool in redis-benchmark redis-cli; do
     fi
 done
 
-CLI=(redis-cli -h "$HOST" -p "$PORT" -a "$PASSWORD" --no-auth-warning)
+CLI=(redis-cli -h "$HOST" -p "$PORT" -a "$PASSWORD" --no-auth-warning --raw)
 BENCH=(redis-benchmark -h "$HOST" -p "$PORT" -a "$PASSWORD"
     -n "$REQUESTS" -c "$CLIENTS" -e)
 
@@ -56,10 +56,90 @@ declare -A COVERED_COMMANDS=()
 declare -a SUMMARY_LINES=()
 PASS_COUNT=0
 FAIL_COUNT=0
+SEMANTIC_PASS_COUNT=0
+SEMANTIC_FAIL_COUNT=0
+CONCURRENT_TMP=""
 
 die() {
     echo "ERROR: $*" >&2
     exit 2
+}
+
+if [[ ! $REQUESTS =~ ^[0-9]+$ || $REQUESTS -lt 10 ]]; then
+    die "requests must be an integer of at least 10"
+fi
+if [[ ! $CLIENTS =~ ^[0-9]+$ || $CLIENTS -lt 1 ]]; then
+    die "clients must be a positive integer"
+fi
+
+cleanup() {
+    if [[ -n $CONCURRENT_TMP ]]; then
+        rm -rf "$CONCURRENT_TMP"
+    fi
+}
+trap cleanup EXIT
+
+record_semantic() {
+    local description=$1 expected=$2 actual=$3
+    if [[ "$expected" == "$actual" ]]; then
+        SEMANTIC_PASS_COUNT=$((SEMANTIC_PASS_COUNT + 1))
+        echo "PASS semantic: $description"
+    else
+        SEMANTIC_FAIL_COUNT=$((SEMANTIC_FAIL_COUNT + 1))
+        echo "FAIL semantic: $description (expected='$expected', actual='$actual')"
+    fi
+}
+
+raw() {
+    local output
+    if ! output=$("${CLI[@]}" "$@" 2>/dev/null); then
+        printf ''
+        return
+    fi
+    printf '%s\n' "$output"
+}
+
+semantic_value() {
+    local description=$1 expected=$2
+    shift 2
+    local actual
+    actual=$(raw "$@" | tr -d '\0')
+    record_semantic "$description" "$expected" "$actual"
+}
+
+semantic_int() {
+    local description=$1 expected=$2
+    shift 2
+    local actual
+    actual=$(raw "$@" | tr -d '\0')
+    actual=${actual#\(*integer\)}
+    record_semantic "$description" "$expected" "$actual"
+}
+
+semantic_unordered() {
+    local description=$1 expected=$2
+    shift 2
+    local actual normalized
+    actual=$(raw "$@" | tr -d '\0' | sort)
+    normalized=$(printf '%s\n' "$expected" | sort)
+    record_semantic "$description" "$normalized" "$actual"
+}
+
+assert_scan_semantics() {
+    local description=$1 expected_items=$2
+    shift 2
+    local raw_output cursor actual expected
+    raw_output=$(raw "$@" | tr -d '\0')
+    cursor=$(printf '%s\n' "$raw_output" | head -n 1)
+    actual=$(printf '%s\n' "$raw_output" | tail -n +2 | sort)
+    expected=$(printf '%s\n' "$expected_items" | tr ' ' '\n' | sort)
+    if [[ "$cursor" =~ ^[0-9]+$ && "$actual" == "$expected" ]]; then
+        SEMANTIC_PASS_COUNT=$((SEMANTIC_PASS_COUNT + 1))
+        echo "PASS semantic: $description"
+    else
+        SEMANTIC_FAIL_COUNT=$((SEMANTIC_FAIL_COUNT + 1))
+        echo "FAIL semantic: $description (expected cursor=numeric items='$expected', actual='$raw_output')"
+    fi
 }
 
 run() {
@@ -84,6 +164,11 @@ benchmark() {
     fi
 
     rps=$(printf '%s\n' "$output" | awk '/requests per second/ {rps=$1} END {print rps}')
+    if [[ $status == pass && ( -z $rps || ( ! $rps =~ ^[0-9]+([.][0-9]+)?$ && $rps != inf ) ) ]]; then
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        status=fail
+        echo "FAIL $name (missing or invalid requests-per-second measurement)"
+    fi
     {
         printf '\n## %s\n\n' "$(printf '%s' "$*" | sed 's/[[:cntrl:]]//g')"
         printf 'Result: %s\n\n' "$status"
@@ -170,6 +255,145 @@ seed_data() {
     run ZADD benchmark:zset-rem 1 a 2 b
     run ZADD benchmark:zset-rem-rank 1 a 2 b 3 c
     run ZADD benchmark:zset-rem-score 1 a 2 b 3 c
+}
+
+check_semantics() {
+    local counter_expected float_expected hash_age_expected lpop_expected
+    counter_expected=$((10 + REQUESTS * 3))
+    float_expected=$(awk -v n="$REQUESTS" 'BEGIN {printf "%.17g", 1.5 + n * 2.5}')
+    hash_age_expected=$(awk -v n="$REQUESTS" 'BEGIN {printf "%.17g", 30 + n * 1.5}')
+    lpop_expected=$(seq "$((REQUESTS - 2))" "$((REQUESTS + 3))")
+
+    section_header="Semantic correctness"
+    echo
+    echo "$section_header"
+
+    # String state and arithmetic invariants.
+    semantic_value "SAVE returns explicit success reply" "OK" SAVE
+    semantic_value "SAVE preserves seeded data" "hello world" GET benchmark:string
+    semantic_value "GETSET final value" "new value" GET benchmark:getset
+    semantic_value "SET final value" "new value" GET benchmark:string-write
+    semantic_value "SETEX final value" "value" GET benchmark:setex
+    semantic_value "PSETEX final value" "value" GET benchmark:psetex
+    semantic_value "SETNX creates once" "value" GET benchmark:setnx
+    semantic_int "SETRANGE final length" "11" STRLEN benchmark:setrange
+    semantic_value "MSET first value" "a" GET benchmark:mset-a
+    semantic_value "MSET second value" "b" GET benchmark:mset-b
+    semantic_int "APPEND accumulates every write" "$((5 + REQUESTS * 6))" STRLEN benchmark:append
+    semantic_int "INCR/INCRBY/DECR/DECRBY counter" "$counter_expected" GET benchmark:counter
+    semantic_value "INCRBYFLOAT counter" "$float_expected" GET benchmark:float-counter
+
+    # Hash field and arithmetic invariants.
+    semantic_value "HSET final value" "China" HGET benchmark:hash country
+    semantic_value "HSETNX creates once" "Go" HGET benchmark:hash language
+    semantic_value "HMSET final value" "engineer" HGET benchmark:hash role
+    semantic_value "HINCRBYFLOAT field" "$hash_age_expected" HGET benchmark:hash age
+    semantic_unordered "HDEL removes field" $'name\nage\ncity\ncountry\nlanguage\nrole' HKEYS benchmark:hash
+    semantic_int "HLEN final field count" "6" HLEN benchmark:hash
+
+    # List length and content invariants.
+    semantic_value "LSET updates target" $'x\nupdated\nz' LRANGE benchmark:lset 0 -1
+    semantic_int "LINSERT inserts every request" "$((REQUESTS + 3))" LLEN benchmark:linsert
+    semantic_value "LREM removes all matching elements" $'b\nc' LRANGE benchmark:lrem 0 -1
+    semantic_value "LPOP leaves final six elements" "$lpop_expected" LRANGE benchmark:lpop 0 -1
+    semantic_value "RPOP leaves first six elements" $'a\nb\nc\n1\n2\n3' LRANGE benchmark:rpop 0 -1
+    semantic_int "RPOPLPUSH source length" "6" LLEN benchmark:rpoplpush-src
+    semantic_int "RPOPLPUSH destination length" "$((REQUESTS + 1))" LLEN benchmark:rpoplpush-dst
+    semantic_value "LTRIM keeps requested range" $'a\nb' LRANGE benchmark:ltrim 0 -1
+    semantic_int "LPUSH appends every request" "$REQUESTS" LLEN benchmark:lpush-write
+    semantic_int "RPUSH appends every request" "$REQUESTS" LLEN benchmark:rpush-write
+
+    # Set membership and cardinality invariants.
+    semantic_unordered "SADD accumulates distinct members" $'another\nx' SMEMBERS benchmark:set-write
+    semantic_int "SPOP leaves final six members" "6" SCARD benchmark:spop
+    semantic_unordered "SREM removes existing member only" $'y\nz' SMEMBERS benchmark:srem
+    semantic_unordered "SMOVE moves existing member only" $'y\nz' SMEMBERS benchmark:smove-src
+    semantic_unordered "SINTERSTORE result" "b" SMEMBERS benchmark:sinter-result
+    semantic_unordered "SUNIONSTORE result" $'a\nb\nc\nd' SMEMBERS benchmark:sunion-result
+    semantic_unordered "SDIFFSTORE result" "a" SMEMBERS benchmark:sdiff-result
+
+    # Sorted-set score and membership invariants.
+    semantic_value "ZADD is idempotent" "2" ZSCORE benchmark:zset-write another
+    semantic_value "ZINCRBY accumulates every request" "$((1 + REQUESTS * 2))" ZSCORE benchmark:zset-incr member
+    semantic_value "ZREM removes existing member only" "b" ZRANGE benchmark:zset-rem 0 -1
+    semantic_value "ZREMRANGEBYRANK eventually removes all members" "" ZRANGE benchmark:zset-rem-rank 0 -1
+    semantic_value "ZREMRANGEBYSCORE removes matching range once" "c" ZRANGE benchmark:zset-rem-score 0 -1
+    semantic_value "ZINTERSTORE result" $'b\nc' ZRANGE benchmark:zinter-result 0 -1
+    semantic_value "ZUNIONSTORE result" $'a\nb\nd\nc' ZRANGE benchmark:zunion-result 0 -1
+
+    # Scan replies must have a numeric cursor and exact element set.
+    assert_scan_semantics "HSCAN final fields" \
+        "name Alice age $hash_age_expected city Beijing country China language Go role engineer" \
+        HSCAN benchmark:hash 0 COUNT 100
+    assert_scan_semantics "SSCAN final members" "a b c d" SSCAN benchmark:set 0 COUNT 100
+    assert_scan_semantics "ZSCAN final members" "one 1 two 2 three 3 four 4 five 5" ZSCAN benchmark:zset 0 COUNT 100
+}
+
+run_concurrent_invariants() {
+    local workers="$CLIENTS"
+    local per_worker=$((REQUESTS / CLIENTS))
+    if (( per_worker < 5 )); then
+        per_worker=5
+    elif (( per_worker > 20 )); then
+        per_worker=20
+    fi
+    local total_operations=$((workers * per_worker))
+    local expected_increment_sum=$((total_operations * (total_operations + 1) / 2))
+
+    CONCURRENT_TMP=$(mktemp -d)
+    run DEL benchmark:concurrent:list benchmark:concurrent:counter
+    run SET benchmark:concurrent:counter 0
+
+    worker() {
+        local id=$1 increment_sum=0 push_replies=0 reply
+        local i
+        for ((i = 0; i < per_worker; i++)); do
+            reply=$("${CLI[@]}" INCR benchmark:concurrent:counter) || return 1
+            [[ $reply =~ ^[0-9]+$ ]] || return 1
+            increment_sum=$((increment_sum + reply))
+
+            reply=$("${CLI[@]}" LPUSH benchmark:concurrent:list "worker-${id}-${i}") || return 1
+            [[ $reply =~ ^[0-9]+$ ]] || return 1
+            push_replies=$((push_replies + 1))
+        done
+        printf '%s\n%s\n' "$increment_sum" "$push_replies"
+    }
+
+    local pids=()
+    local worker_id
+    for ((worker_id = 0; worker_id < workers; worker_id++)); do
+        worker "$worker_id" >"$CONCURRENT_TMP/worker-$worker_id" &
+        pids+=("$!")
+    done
+
+    local pid failed=false
+    for pid in "${pids[@]}"; do
+        if ! wait "$pid"; then
+            failed=true
+        fi
+    done
+    if [[ $failed == true ]]; then
+        SEMANTIC_FAIL_COUNT=$((SEMANTIC_FAIL_COUNT + 1))
+        echo "FAIL semantic: concurrent workers returned errors"
+        return
+    fi
+
+    local increment_sum=0 push_replies=0 file
+    for file in "$CONCURRENT_TMP"/worker-*; do
+        mapfile -t values <"$file"
+        increment_sum=$((increment_sum + values[0]))
+        push_replies=$((push_replies + values[1]))
+    done
+
+    local final_counter final_list_len
+    final_counter=$(raw GET benchmark:concurrent:counter)
+    final_list_len=$(raw LLEN benchmark:concurrent:list)
+    record_semantic "concurrent INCR returns every value once" \
+        "$expected_increment_sum" "$increment_sum"
+    record_semantic "concurrent INCR final value" "$total_operations" "$final_counter"
+    local actual_invariant="$total_operations:$push_replies:$final_list_len"
+    record_semantic "concurrent LPUSH reply count equals final LLEN" \
+        "$total_operations:$total_operations:$total_operations" "$actual_invariant"
 }
 
 check_prerequisites
@@ -272,7 +496,7 @@ benchmark LREM benchmark:lrem 1 a
 benchmark LPOP benchmark:lpop
 benchmark RPOP benchmark:rpop
 benchmark RPOPLPUSH benchmark:rpoplpush-src benchmark:rpoplpush-dst
-benchmark LTRIM benchmark:ltrim 1 2
+benchmark LTRIM benchmark:ltrim 0 1
 benchmark LPUSH benchmark:lpush-write element
 benchmark RPUSH benchmark:rpush-write element
 
@@ -321,9 +545,15 @@ benchmark ZINTERSTORE benchmark:zinter-result 2 \
 benchmark ZUNIONSTORE benchmark:zunion-result 2 \
     benchmark:zset-a benchmark:zset-b
 
+check_semantics
+
+run_concurrent_invariants
+
 # These are intentionally last because they remove the seeded dataset.
 benchmark FLUSHDB
 benchmark FLUSHALL
+
+semantic_int "FLUSHALL removes all keys" "0" DBSIZE
 
 missing=()
 for name in "${EXPECTED_COMMANDS[@]}"; do
@@ -341,7 +571,11 @@ else
 fi
 
 echo
-echo "Summary: $PASS_COUNT passed, $FAIL_COUNT failed"
+echo "Benchmark summary: $PASS_COUNT passed, $FAIL_COUNT failed"
+echo "Semantic summary: $SEMANTIC_PASS_COUNT passed, $SEMANTIC_FAIL_COUNT failed"
+FAIL_COUNT=$((FAIL_COUNT + SEMANTIC_FAIL_COUNT))
+PASS_COUNT=$((PASS_COUNT + SEMANTIC_PASS_COUNT))
+echo "Overall summary: $PASS_COUNT passed, $FAIL_COUNT failed"
 {
     printf '\n# Throughput Summary\n\n'
     printf '| Command | Requests/sec | Result |\n'
@@ -351,6 +585,10 @@ echo "Summary: $PASS_COUNT passed, $FAIL_COUNT failed"
     fi
 
     printf '\n# Summary\n\n'
+    printf -- '- Benchmark checks passed: %s\n' "$((PASS_COUNT - SEMANTIC_PASS_COUNT))"
+    printf -- '- Benchmark checks failed: %s\n' "$((FAIL_COUNT - SEMANTIC_FAIL_COUNT))"
+    printf -- '- Semantic checks passed: %s\n' "$SEMANTIC_PASS_COUNT"
+    printf -- '- Semantic checks failed: %s\n' "$SEMANTIC_FAIL_COUNT"
     printf -- '- Commands passed: %s\n' "$PASS_COUNT"
     printf -- '- Commands failed: %s\n' "$FAIL_COUNT"
     printf -- '- Report path: %s\n' "$REPORT"

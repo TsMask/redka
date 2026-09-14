@@ -66,18 +66,78 @@ func DefaultConfig() *ServerConfig {
 
 // Load loads configuration from a YAML file.
 func Load(path string) (*ServerConfig, error) {
+	cfg := DefaultConfig()
+	if err := applyFile(cfg, path); err != nil {
+		return nil, err
+	}
+	cfg.ConfigFile = path
+	return cfg, nil
+}
+
+// fileConfig uses pointers so omitted fields do not overwrite values already
+// supplied by defaults or the environment.
+type fileConfig struct {
+	Host             *string `yaml:"host"`
+	Port             *int    `yaml:"port"`
+	Sock             *string `yaml:"sock"`
+	DBDSN            *string `yaml:"db_dsn"`
+	Password         *string `yaml:"password"`
+	Databases        *int    `yaml:"databases"`
+	MaxClients       *int    `yaml:"max_clients"`
+	SlowlogMaxLen    *int    `yaml:"slowlog_max_len"`
+	SlowlogThreshold *int    `yaml:"slowlog_threshold"`
+	CleanupInterval  *int    `yaml:"cleanup_interval"`
+	Verbose          *bool   `yaml:"verbose"`
+	LogFile          *string `yaml:"log_file"`
+}
+
+func applyFile(cfg *ServerConfig, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config file: %w", err)
+		return fmt.Errorf("read config file: %w", err)
 	}
 
-	config := DefaultConfig()
-	if err := yaml.Unmarshal(data, config); err != nil {
-		return nil, fmt.Errorf("parse config file: %w", err)
+	var file fileConfig
+	if err := yaml.Unmarshal(data, &file); err != nil {
+		return fmt.Errorf("parse config file: %w", err)
 	}
-
-	config.ConfigFile = path
-	return config, nil
+	if file.Host != nil {
+		cfg.Host = *file.Host
+	}
+	if file.Port != nil {
+		cfg.Port = *file.Port
+	}
+	if file.Sock != nil {
+		cfg.Sock = *file.Sock
+	}
+	if file.DBDSN != nil {
+		cfg.DBDSN = *file.DBDSN
+	}
+	if file.Password != nil {
+		cfg.Password = *file.Password
+	}
+	if file.Databases != nil {
+		cfg.Databases = *file.Databases
+	}
+	if file.MaxClients != nil {
+		cfg.MaxClients = *file.MaxClients
+	}
+	if file.SlowlogMaxLen != nil {
+		cfg.SlowlogMaxLen = *file.SlowlogMaxLen
+	}
+	if file.SlowlogThreshold != nil {
+		cfg.SlowlogThreshold = *file.SlowlogThreshold
+	}
+	if file.CleanupInterval != nil {
+		cfg.CleanupInterval = *file.CleanupInterval
+	}
+	if file.Verbose != nil {
+		cfg.Verbose = *file.Verbose
+	}
+	if file.LogFile != nil {
+		cfg.LogFile = *file.LogFile
+	}
+	return nil
 }
 
 // Validate validates the configuration.
