@@ -115,14 +115,36 @@ func deleteAllKeyValues(tx *gorm.DB) error {
 	return nil
 }
 
+func deleteDBKeyValues(tx *gorm.DB, dbIdx int) error {
+	for _, table := range []string{"rstring", "rhash", "rlist", "rset", "rzset"} {
+		query := "DELETE FROM " + table +
+			" WHERE kid IN (SELECT id FROM rkey WHERE kdb = ?)"
+		if err := tx.Exec(query, dbIdx).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // DeleteAll deletes all keys and their values, effectively resetting
 // the database. Should not be run inside a database transaction.
 func (d *DB) DeleteAll() error {
-	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	return d.store.ExclusiveTransaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
 		if err := deleteAllKeyValues(tx); err != nil {
 			return err
 		}
 		return tx.Where("1 = 1").Delete(&store.RKey{}).Error
+	})
+}
+
+// DeleteAllInDB deletes all keys and values in the repository's logical
+// database. It is the storage implementation of FLUSHDB.
+func (d *DB) DeleteAllInDB() error {
+	return d.store.ExclusiveTransaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		if err := deleteDBKeyValues(tx, d.dbIdx); err != nil {
+			return err
+		}
+		return tx.Where("kdb = ?", d.dbIdx).Delete(&store.RKey{}).Error
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -19,6 +20,7 @@ type Store struct {
 
 	writeCommitter *writeCommitter
 	inTx           bool          // true when DB is already a transaction
+	writeMu        *sync.RWMutex // gates destructive flush operations
 	cleanupTicker  *time.Ticker  // timer for periodic cleanup
 	cleanupStop    chan struct{} // channel to stop cleanup goroutine
 }
@@ -42,6 +44,7 @@ func Open(dsn string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	store.writeMu = &sync.RWMutex{}
 	if err := store.Migrate(); err != nil {
 		return nil, err
 	}
@@ -53,6 +56,24 @@ func (s *Store) Transaction(ctx context.Context, fn func(gormTx *gorm.DB, dialec
 	if s.inTx {
 		return fn(s.DB.WithContext(ctx), s.Dialect)
 	}
+	s.writeMu.RLock()
+	defer s.writeMu.RUnlock()
+	return s.rawTransaction(ctx, fn)
+}
+
+// ExclusiveTransaction waits for already-started transactions and blocks new
+// ones while fn runs. FLUSHDB and FLUSHALL use it to establish a stable
+// barrier against concurrent command writers.
+func (s *Store) ExclusiveTransaction(ctx context.Context, fn func(gormTx *gorm.DB, dialect Dialect) error) error {
+	if s.inTx {
+		return fn(s.DB.WithContext(ctx), s.Dialect)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.rawTransaction(ctx, fn)
+}
+
+func (s *Store) rawTransaction(ctx context.Context, fn func(gormTx *gorm.DB, dialect Dialect) error) error {
 	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return fn(tx, s.Dialect)
 	})

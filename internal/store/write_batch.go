@@ -89,6 +89,9 @@ func (s *Store) TransactionWriteItems(ctx context.Context, scope string, item an
 		})
 	}
 
+	s.writeMu.RLock()
+	defer s.writeMu.RUnlock()
+
 	req := writeRequest{
 		ctx:     ctx,
 		scope:   scope,

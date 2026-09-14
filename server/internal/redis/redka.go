@@ -39,6 +39,7 @@ type RKey interface {
 	Count(keys ...string) (int, error)
 	Delete(keys ...string) (int, error)
 	DeleteAll() error
+	DeleteAllInDB() error
 	Exists(key string) (bool, error)
 	Expire(key string, ttl time.Duration) error
 	ExpireAt(key string, at time.Time) error
