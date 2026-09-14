@@ -2,11 +2,14 @@
 package slowlog
 
 import (
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/tsmask/redka/server/internal/redis"
 )
+
+var ErrInvalidMaxLen = errors.New("ERR invalid slowlog max length")
 
 // Entry represents a single slow log entry.
 type Entry struct {
@@ -29,9 +32,6 @@ type SlowLog struct {
 
 // New creates a slow log with given max entries and threshold.
 func New(maxLen int, threshold time.Duration) *SlowLog {
-	if maxLen <= 0 {
-		maxLen = 128
-	}
 	return &SlowLog{
 		maxLen:    maxLen,
 		threshold: threshold,
@@ -54,12 +54,24 @@ func (s *SlowLog) SetThreshold(d time.Duration) {
 }
 
 // SetMaxLen updates the max entries.
-func (s *SlowLog) SetMaxLen(n int) {
+func (s *SlowLog) SetMaxLen(n int) error {
+	if n < 0 {
+		return ErrInvalidMaxLen
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if n > 0 {
-		s.maxLen = n
+	s.maxLen = n
+	if len(s.entries) > n {
+		s.entries = s.entries[:n]
 	}
+	return nil
+}
+
+// MaxLen returns the current maximum number of entries.
+func (s *SlowLog) MaxLen() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxLen
 }
 
 // Reset clears all slow log entries.
@@ -78,26 +90,27 @@ func (s *SlowLog) Len() int {
 
 // Push adds a new entry if the duration exceeds threshold.
 func (s *SlowLog) Push(d time.Duration, cmdArgs [][]byte, client, clientName string) {
-	if d < s.threshold {
+	startTime := time.Now().Unix() - int64(d.Seconds())
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.threshold < 0 || d < s.threshold || s.maxLen == 0 {
 		return
 	}
-
 	entry := Entry{
 		ID:         s.nextID,
-		StartTime:  time.Now().Unix() - int64(d.Seconds()),
+		StartTime:  startTime,
 		Duration:   d.Microseconds(),
 		Cmd:        cmdArgs,
 		Client:     client,
 		ClientName: clientName,
 	}
 
-	s.mu.Lock()
 	s.nextID++
 	s.entries = append([]Entry{entry}, s.entries...)
-	if len(s.entries) > s.maxLen {
+	if s.maxLen < len(s.entries) {
 		s.entries = s.entries[:s.maxLen]
 	}
-	s.mu.Unlock()
 }
 
 // Get returns up to n entries (newest first). n=-1 means all.

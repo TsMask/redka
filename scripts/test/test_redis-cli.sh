@@ -154,6 +154,22 @@ assert_ttl() {
     fi
 }
 
+assert_config_get_value() {
+    local desc="$1" param="$2" expect="$3"
+    COVERED_COMMANDS[config]=1
+    local actual
+    actual=$($CLI CONFIG GET "$param" 2>/dev/null | tail -n 1 | tr -d '\0')
+    if [ "$actual" = "$expect" ]; then
+        PASS_COUNT=$((PASS_COUNT + 1))
+        printf "  \033[32mPASS\033[0m %s\n" "$desc"
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        printf "  \033[31mFAIL\033[0m %s\n" "$desc"
+        printf "    Expected: '%s'\n" "$expect"
+        printf "    Actual:   '%s'\n" "$actual"
+    fi
+}
+
 assert_coverage() {
     section "命令覆盖检查"
     local missing=()
@@ -195,6 +211,12 @@ assert_eq  "SELECT 0"                    "OK"                SELECT 0
 assert_int "DBSIZE (空库)"               "0"                 DBSIZE
 assert_eq  "COMMAND"                     "OK"                COMMAND
 assert_any "CONFIG GET"                                      CONFIG get requirepass
+assert_eq  "CONFIG SET slowlog threshold"          "OK"              CONFIG SET slowlog-log-slower-than 250
+assert_config_get_value "CONFIG GET slowlog threshold" "slowlog-log-slower-than" "250"
+assert_eq  "CONFIG SET slowlog max length"         "OK"              CONFIG SET slowlog-max-len 128
+assert_config_get_value "CONFIG GET slowlog max length" "slowlog-max-len" "128"
+assert_pattern "CONFIG SET unsupported parameter"  "ERR Unsupported CONFIG parameter: requirepass" CONFIG SET requirepass secret
+assert_eq  "CONFIG SET restore slowlog threshold"  "OK"              CONFIG SET slowlog-log-slower-than 1500000
 assert_any "INFO"                                            INFO
 assert_any "LOLWUT"                                          LOLWUT
 assert_eq  "FLUSHALL"                    "OK"                FLUSHALL

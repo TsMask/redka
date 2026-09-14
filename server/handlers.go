@@ -124,12 +124,16 @@ func logging(next redcon.HandlerFunc, sl *slowlog.SlowLog) redcon.HandlerFunc {
 		elapsed := time.Since(start)
 
 		// Push to slow log if exceeds threshold
-		if sl != nil && elapsed >= sl.Threshold() {
+		threshold := time.Duration(-1)
+		if sl != nil {
+			threshold = sl.Threshold()
+		}
+		if sl != nil && threshold >= 0 && elapsed >= threshold {
 			slog.Warn("slow query detected",
 				"command", string(cmd.Args[0]),
 				"client", conn.RemoteAddr(),
 				"duration", elapsed,
-				"threshold", sl.Threshold(),
+				"threshold", threshold,
 			)
 
 			clientName := redis.GetClientName(redis.NewConnWriter(conn))

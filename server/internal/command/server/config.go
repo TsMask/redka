@@ -13,6 +13,7 @@ type Config struct {
 	redis.BaseCmd
 	subcmd string
 	get    ConfigGet
+	set    ConfigSet
 }
 
 func ParseConfig(b redis.BaseCmd) (Config, error) {
@@ -29,6 +30,8 @@ func ParseConfig(b redis.BaseCmd) (Config, error) {
 	switch cmd.subcmd {
 	case "get":
 		cmd.get, err = ParseConfigGet(args)
+	case "set":
+		cmd.set, err = ParseConfigSet(args)
 	default:
 		err = redis.ErrUnknownSubcmd
 	}
@@ -44,8 +47,9 @@ func (c Config) Run(w redis.Writer, red redis.Redka) (any, error) {
 	switch c.subcmd {
 	case "get":
 		return c.get.Run(w, red)
+	case "set":
+		return c.set.Run(w, red)
 	default:
-		w.WriteString("OK")
-		return true, nil
+		return nil, redis.ErrUnknownSubcmd
 	}
 }

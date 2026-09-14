@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/tsmask/redka/server/internal/redis"
+	"github.com/tsmask/redka/server/internal/slowlog"
 )
 
 // Returns the effective values of configuration parameters.
@@ -45,6 +46,7 @@ func (c ConfigGet) Run(w redis.Writer, red redis.Redka) (any, error) {
 
 	// Build values in the same order as the deduplicated parameters.
 	infos := make(map[string]string, len(c.params))
+	sl := slowlog.GetFromWriter(w)
 
 	for _, param := range c.params {
 		switch param {
@@ -73,6 +75,18 @@ func (c ConfigGet) Run(w redis.Writer, red redis.Redka) (any, error) {
 			} else {
 				infos[param] = "6379"
 			}
+		case "slowlog-log-slower-than":
+			if sl == nil {
+				w.WriteError("ERR slowlog not available")
+				return false, nil
+			}
+			infos[param] = fmt.Sprintf("%d", sl.Threshold().Microseconds())
+		case "slowlog-max-len":
+			if sl == nil {
+				w.WriteError("ERR slowlog not available")
+				return false, nil
+			}
+			infos[param] = fmt.Sprintf("%d", sl.MaxLen())
 		default:
 			// For unknown parameters, return empty string
 			infos[param] = ""
