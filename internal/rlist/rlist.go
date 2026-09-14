@@ -1543,9 +1543,9 @@ func (d *DB) pushMany(key string, elems []any, back bool) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		pushes[i] = listPushItem{elem: elemb, back: back, length: &newLen}
+		pushes[i] = listPushItem{elem: elemb, back: back}
 	}
-	item := listPushBatch{items: pushes}
+	item := listPushBatch{items: pushes, length: &newLen}
 	var err error
 	err = d.store.TransactionWriteItems(d.ctx,
 		"list:push:"+strconv.Itoa(d.dbIdx)+"\x00"+key, item,
@@ -1616,7 +1616,6 @@ func (d *DB) pushMany(key string, elems []any, back bool) (int, error) {
 							head -= listPositionInterval
 							pos = head
 						}
-						*push.length = baseLen + sequence + 1
 						sequence++
 						rows = append(rows, store.RList{
 							KID:  rkey.ID,
@@ -1624,6 +1623,7 @@ func (d *DB) pushMany(key string, elems []any, back bool) (int, error) {
 							Elem: push.elem,
 						})
 					}
+					*batch.length = baseLen + sequence
 				}
 
 				if len(rows) == 1 {
@@ -1650,13 +1650,13 @@ func (d *DB) pushMany(key string, elems []any, back bool) (int, error) {
 }
 
 type listPushItem struct {
-	elem   []byte
-	back   bool
-	length *int
+	elem []byte
+	back bool
 }
 
 type listPushBatch struct {
-	items []listPushItem
+	items  []listPushItem
+	length *int
 }
 
 func listPushUpdates(now int64, expired bool, count int, head, tail int64) map[string]any {
