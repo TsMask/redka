@@ -300,8 +300,10 @@ func (d *DB) updateTTL(key string, item ttlWriteItem) error {
 				updates["expire_at"] = nil
 			}
 
+			now := time.Now().UnixMilli()
 			result := tx.Model(&store.RKey{}).
 				Where("kdb = ? AND kname = ?", d.dbIdx, key).
+				Scopes(store.NotExpired(now)).
 				Updates(updates)
 			if result.Error != nil {
 				return result.Error
