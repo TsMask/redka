@@ -266,6 +266,10 @@ assert_int "RPUSH mylist c"              "3"                 RPUSH mylist c
 assert_int "RPUSH mylist d"              "4"                 RPUSH mylist d
 assert_int "LLEN mylist"                 "4"                 LLEN mylist
 assert_pattern "LRANGE mylist 0 -1"      "b|a|c|d"           LRANGE mylist 0 -1
+assert_int "LPUSH multi a b c"           "3"                 LPUSH orderlist a b c
+assert_pattern "LPUSH multi order"       "c|b|a"             LRANGE orderlist 0 -1
+assert_int "RPUSH multi x y"             "5"                 RPUSH orderlist x y
+assert_pattern "RPUSH multi order"       "c|b|a|x|y"         LRANGE orderlist 0 -1
 assert_eq  "LINDEX mylist 0"             "b"                 LINDEX mylist 0
 assert_eq  "LSET mylist 1"               "OK"                LSET mylist 1 updated
 assert_int "LINSERT before c"            "5"                 LINSERT mylist before c inserted

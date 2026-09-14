@@ -11,6 +11,8 @@ import (
 
 // newSQLite creates a new SQLite database handle using GORM.
 func newSQLite(dsn string) (*Store, error) {
+	source, _, _ := strings.Cut(dsn, "?")
+	memory := source == ":memory:" || source == "file::memory:"
 	dsn = sqliteDataSource(dsn)
 
 	// Open the database connection
@@ -25,7 +27,7 @@ func newSQLite(dsn string) (*Store, error) {
 	}
 
 	// Configure connection pool
-	if err := store.configurePoolSQLite(); err != nil {
+	if err := store.configurePoolSQLite(memory); err != nil {
 		return nil, err
 	}
 
@@ -37,13 +39,22 @@ func newSQLite(dsn string) (*Store, error) {
 // We use 1 writer (enforced by SQLite locking) + multiple readers.
 // MaxOpenConns=1 would serialize everything; a higher value allows
 // concurrent reads which is critical for read-heavy workloads.
-func (s *Store) configurePoolSQLite() error {
+func (s *Store) configurePoolSQLite(memory bool) error {
 	sqlDB, err := s.DB.DB()
 	if err != nil {
 		return err
 	}
-	sqlDB.SetMaxOpenConns(8)
-	sqlDB.SetMaxIdleConns(4)
+	maxOpenConns := 8
+	maxIdleConns := 4
+	if memory {
+		// Each private in-memory SQLite connection has its own database.
+		// Restricting the pool to one connection preserves schema and data
+		// correctness; file-backed databases retain WAL concurrency.
+		maxOpenConns = 1
+		maxIdleConns = 1
+	}
+	sqlDB.SetMaxOpenConns(maxOpenConns)
+	sqlDB.SetMaxIdleConns(maxIdleConns)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 	return nil
@@ -52,25 +63,41 @@ func (s *Store) configurePoolSQLite() error {
 // sqliteDataSource returns an SQLite connection string.
 func sqliteDataSource(path string) string {
 	// Parse the parameters.
-	source, query, hasQuery := strings.Cut(path, "?")
+	source, query, _ := strings.Cut(path, "?")
 	params, _ := url.ParseQuery(query)
-	if !hasQuery {
-		// Apply the pragma settings.
-		pragmas := []string{
-			"journal_mode(WAL)",            // 启用 WAL 模式
-			"synchronous(NORMAL)",          // NORMAL 同步级别
-			"wal_autocheckpoint(5000)",     // 每 5000 页触发一次检查点
-			"busy_timeout(5000)",           // 设置忙碌时最大等待 5 秒
-			"mmap_size(268435456)",         // 设置 MMAP 大小为 256MB
-			"locking_mode(NORMAL)",         // 使用 NORMAL 锁定模式
-			"journal_size_limit(16777216)", // 设置 WAL 日志文件大小为 16MB
-			"cache_size(-64000)",           // 设置缓存大小为 64MB (-64000 表示 64MB)
-			"temp_store(MEMORY)",           // 使用内存存储临时表
-			"page_size=4096",               // 设置页大小为 4KB
-			"foreign_keys=ON",              // 启用外键约束
+
+	// Redka manages one process-level connection pool. Private caches let WAL
+	// handle cross-connection concurrency; shared-cache mode would reintroduce
+	// SQLite table locks and conflict with concurrent command execution.
+	params.Del("cache")
+
+	// Keep explicit driver parameters and pragmas. A user-provided pragma of
+	// the same name intentionally wins over the Redka default.
+	existingPragmas := make(map[string]bool, len(params["_pragma"]))
+	for _, pragma := range params["_pragma"] {
+		name, _, _ := strings.Cut(pragma, "(")
+		name, _, _ = strings.Cut(name, "=")
+		if name != "" {
+			existingPragmas[name] = true
 		}
-		for _, v := range pragmas {
-			params.Add("_pragma", v)
+	}
+	defaultPragmas := []string{
+		"journal_mode(WAL)",
+		"synchronous(NORMAL)",
+		"wal_autocheckpoint(5000)",
+		"busy_timeout(5000)",
+		"mmap_size(268435456)",
+		"locking_mode(NORMAL)",
+		"journal_size_limit(16777216)",
+		"cache_size(-64000)",
+		"temp_store(MEMORY)",
+		"page_size=4096",
+		"foreign_keys=ON",
+	}
+	for _, pragma := range defaultPragmas {
+		name, _, _ := strings.Cut(pragma, "(")
+		if !existingPragmas[name] {
+			params.Add("_pragma", pragma)
 		}
 	}
 

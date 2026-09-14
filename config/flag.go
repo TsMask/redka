@@ -17,6 +17,7 @@ func FlagConfig() *ServerConfig {
 	var portStr string
 	var configFile string
 	var hostFlag, portFlag, sockFlag, passwordFlag bool
+	var positionalDSN string
 
 	// Track which flags were explicitly set
 	flag.StringVar(
@@ -47,6 +48,15 @@ func FlagConfig() *ServerConfig {
 	flag.BoolVar(&cfg.Verbose, "v", false, "verbose logging")
 	flag.Parse()
 
+	args := flag.Args()
+	if len(args) > 1 {
+		slog.Error("too many arguments; expected at most one data source")
+		os.Exit(1)
+	}
+	if len(args) == 1 {
+		positionalDSN = args[0]
+	}
+
 	// Track which flags were explicitly set via command line
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -69,6 +79,10 @@ func FlagConfig() *ServerConfig {
 			os.Exit(1)
 		}
 		cfg = fileConfig
+	}
+
+	if positionalDSN != "" {
+		cfg.DBDSN = positionalDSN
 	}
 
 	// Command line arguments override file config and environment variables

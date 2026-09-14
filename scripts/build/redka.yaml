@@ -50,5 +50,5 @@ cleanup_interval: 10  # 过期key清理间隔（秒），默认10秒（类似Red
 # ===========================================
 # 日志设置
 # ===========================================
-verbose: false        # 是否启用详细日志
-log_file: ""          # 日志文件路径（留空表示输出到 stdout）
+verbose: false        # 是否启用详细日志 （Debug, Info, Warn, Error）
+log_file: ""          # 日志文件路径（留空表示Warn, Error输出到 stdout）

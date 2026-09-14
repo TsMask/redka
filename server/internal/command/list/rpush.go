@@ -28,14 +28,10 @@ func ParseRPush(b redis.BaseCmd) (RPush, error) {
 }
 
 func (cmd RPush) Run(w redis.Writer, red redis.Redka) (any, error) {
-	var n int
-	var err error
-	for _, elem := range cmd.elems {
-		n, err = red.List().PushBack(cmd.key, elem)
-		if err != nil {
-			w.WriteError(cmd.Error(err))
-			return nil, err
-		}
+	n, err := red.List().PushBackMany(cmd.key, cmd.elems...)
+	if err != nil {
+		w.WriteError(cmd.Error(err))
+		return nil, err
 	}
 	w.WriteInt(n)
 	return n, nil

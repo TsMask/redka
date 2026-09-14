@@ -13,7 +13,10 @@ func newMySQL(dsn string) (*Store, error) {
 	dsn = mysqlDataSource(dsn)
 
 	// Open the database connection
-	db, err := gorm.Open(mysql.Open(dsn), gormConfig())
+	// OceanBase's MySQL mode limits open cursors. GORM's prepared-statement
+	// cache keeps a cursor per statement/connection; interpolation already
+	// avoids prepare round trips for dynamic statements.
+	db, err := gorm.Open(mysql.Open(dsn), gormConfigWithPreparedStatements(false))
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +40,7 @@ func (s *Store) configurePool() error {
 	if err != nil {
 		return err
 	}
-	sqlDB.SetMaxOpenConns(400)
+	sqlDB.SetMaxOpenConns(64)
 	sqlDB.SetMaxIdleConns(100)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
@@ -76,6 +79,17 @@ func mysqlDataSource(dsn string) string {
 	// loc=Local for local timezone
 	if _, ok := params["loc"]; !ok {
 		params["loc"] = "Local"
+	}
+
+	// CLIENT_FOUND_ROWS keeps matched, unchanged updates on the one-statement
+	// hot path instead of falling back to a read plus transaction.
+	if _, ok := params["clientFoundRows"]; !ok {
+		params["clientFoundRows"] = "true"
+	}
+
+	// Interpolation avoids an extra prepare round trip for dynamic writes.
+	if _, ok := params["interpolateParams"]; !ok {
+		params["interpolateParams"] = "true"
 	}
 
 	// Build the query string

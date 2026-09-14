@@ -66,7 +66,9 @@ type RList interface {
 	PopBackPushFront(src, dest string) (core.Value, error)
 	PopFront(key string) (core.Value, error)
 	PushBack(key string, elem any) (int, error)
+	PushBackMany(key string, elems ...any) (int, error)
 	PushFront(key string, elem any) (int, error)
+	PushFrontMany(key string, elems ...any) (int, error)
 	Range(key string, start, stop int) ([]core.Value, error)
 	Set(key string, idx int, elem any) error
 	Trim(key string, start, stop int) error

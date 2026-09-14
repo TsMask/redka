@@ -25,25 +25,16 @@ func ParseGetSet(b redis.BaseCmd) (GetSet, error) {
 }
 
 func (cmd GetSet) Run(w redis.Writer, red redis.Redka) (any, error) {
-	// Get the current value first
-	oldVal, err := red.Str().Get(cmd.key)
-	if err != nil && err != core.ErrNotFound {
+	oldVal, err := red.Str().SetGet(cmd.key, cmd.value)
+	if err != nil {
 		w.WriteError(cmd.Error(err))
 		return nil, err
 	}
 
-	// Set the new value
-	if err := red.Str().Set(cmd.key, cmd.value); err != nil {
-		w.WriteError(cmd.Error(err))
-		return nil, err
-	}
-
-	// Return the old value (nil if key didn't exist)
-	if err == core.ErrNotFound {
+	if oldVal == nil {
 		w.WriteNull()
 		return core.Value(nil), nil
 	}
-
 	w.WriteBulk(oldVal)
 	return oldVal, nil
 }

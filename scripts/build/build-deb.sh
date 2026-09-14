@@ -53,7 +53,7 @@ Section: database
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: TsMask <https://github.com/TsMask/redka>
-Description: Redka Database Service
+Description: Database Service
  Redka is a Redis-compatible storage solution that uses a relational database as its backend storage.
 EOF
 

@@ -16,6 +16,11 @@ type RKey struct {
 	ExpireAt   *int64 `gorm:"column:expire_at;index:rkey_expire_at_idx"`
 	ModifiedAt int64  `gorm:"column:modified_at;not null;default:0"`
 	KLen       int    `gorm:"column:klen;not null;default:0"` // Length of the key value
+	// List endpoints let LPUSH/RPUSH avoid a MIN/MAX locking query on every
+	// write. They may lag after pops/trims; that is safe because pushes always
+	// move farther away from the list center.
+	KListHead *int64 `gorm:"column:klist_head"`
+	KListTail *int64 `gorm:"column:klist_tail"`
 }
 
 // TableName returns the table name for GORM.

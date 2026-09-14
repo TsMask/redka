@@ -51,7 +51,7 @@ cat > "${DEST_DIR}/SPEC" <<EOF
 Name:           ${PKG_NAME}
 Version:        ${VERSION}
 Release:        ${OS_ID}${OS_VERSION_ID}
-Summary:        Redka Database Service
+Summary:        Database Service
 License:        BSD 3-Clause
 URL:            https://github.com/TsMask/redka
 BuildArch:      ${ARCH}

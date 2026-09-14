@@ -228,7 +228,7 @@ func handleMulti(ctx context.Context, w redis.Writer, state *connState, db *stor
 	// This eliminates the data race caused by WithDB modifying shared state.
 	dbIdx := redis.GetSelectedDB(w)
 	err := db.Transaction(ctx, func(tx *gorm.DB, dialect store.Dialect) error {
-		s := &store.Store{Dialect: dialect, DB: tx}
+		s := store.FromTx(dialect, tx)
 		for _, pcmd := range state.cmds {
 			_, err := pcmd.Run(w, redis.NewRedka(s, dbIdx))
 			if err != nil {
@@ -243,53 +243,15 @@ func handleMulti(ctx context.Context, w redis.Writer, state *connState, db *stor
 	}
 }
 
-// readOnlyCommands is the set of commands that do not modify data.
-// These can be executed without a transaction wrapper, which avoids
-// the overhead of BEGIN/COMMIT and reduces connection pool pressure.
-var readOnlyCommands = map[string]struct{}{
-	"get": {}, "mget": {}, "strlen": {}, "getrange": {}, "substr": {},
-	"exists": {}, "type": {}, "ttl": {}, "pttl": {},
-	"keys": {}, "scan": {}, "randomkey": {}, "dbsize": {},
-	"llen": {}, "lindex": {}, "lrange": {},
-	"hget": {}, "hmget": {}, "hgetall": {}, "hexists": {}, "hlen": {},
-	"hkeys": {}, "hvals": {}, "hstrlen": {}, "hrandfield": {}, "hscan": {},
-	"scard": {}, "sismember": {}, "smismember": {}, "smembers": {},
-	"sdiff": {}, "sinter": {}, "sintercard": {}, "sunion": {},
-	"srandmember": {}, "sscan": {},
-	"zcard": {}, "zscore": {}, "zrank": {}, "zrevrank": {},
-	"zcount": {}, "zrange": {}, "zrevrange": {},
-	"zrangebyscore": {}, "zrevrangebyscore": {},
-	"zinter": {}, "zunion": {}, "zscan": {},
-	"ping": {}, "echo": {}, "info": {}, "command": {},
-	"config": {}, "slowlog": {}, "memory": {}, "lolwut": {},
-}
-
-// isReadOnly checks if a command name is read-only.
-func isReadOnly(name string) bool {
-	_, ok := readOnlyCommands[name]
-	return ok
-}
-
 // handleSingle processes a single command.
-// Read-only commands bypass the transaction wrapper to reduce overhead.
+// Repository methods own their transaction. An additional transaction here
+// doubles the boundary and prevents write methods from using no-op fast paths.
 func handleSingle(ctx context.Context, w redis.Writer, state *connState, db *store.Store) {
 	pcmd := state.pop()
 	dbIdx := redis.GetSelectedDB(w)
 
-	if isReadOnly(pcmd.Name()) {
-		s := &store.Store{Dialect: db.Dialect, DB: db.DB.WithContext(ctx)}
-		_, err := pcmd.Run(w, redis.NewRedka(s, dbIdx))
-		if err != nil {
-			slog.Warn("run single command", "name", pcmd.Name(), "err", err)
-		}
-		return
-	}
-
-	err := db.Transaction(ctx, func(tx *gorm.DB, dialect store.Dialect) error {
-		s := &store.Store{Dialect: dialect, DB: tx}
-		_, err := pcmd.Run(w, redis.NewRedka(s, dbIdx))
-		return err
-	})
+	s := db.WithContext(ctx)
+	_, err := pcmd.Run(w, redis.NewRedka(s, dbIdx))
 	if err != nil {
 		slog.Warn("run single command", "name", pcmd.Name(), "err", err)
 	}

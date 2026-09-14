@@ -3,9 +3,12 @@
 package rstring
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -45,10 +48,16 @@ func (d *DB) WithDB(dbIdx int) *DB {
 func (d *DB) Get(key string) (core.Value, error) {
 	now := time.Now().UnixMilli()
 
-	var rkey store.RKey
-	err := d.store.DB.
-		Where("kdb = ? AND kname = ?", d.dbIdx, key).
-		First(&rkey).Error
+	var row struct {
+		KType    int    `gorm:"column:ktype"`
+		ExpireAt *int64 `gorm:"column:expire_at"`
+		KVal     []byte `gorm:"column:kval"`
+	}
+	err := d.store.DB.Model(&store.RKey{}).
+		Select("rkey.ktype, rkey.expire_at, rstring.kval").
+		Joins("LEFT JOIN rstring ON rstring.kid = rkey.id").
+		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
+		First(&row).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return core.Value{}, core.ErrNotFound
@@ -58,35 +67,17 @@ func (d *DB) Get(key string) (core.Value, error) {
 	}
 
 	// Lazy expiration: check if key is expired
-	if rkey.ExpireAt != nil && *rkey.ExpireAt <= now {
-		// Key is expired, delete it and return not found
-		d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-			tx.Where("kid = ?", rkey.ID).Delete(&store.RString{})
-			tx.Delete(&rkey)
-			return nil
-		})
+	if row.ExpireAt != nil && *row.ExpireAt <= now {
 		return core.Value{}, core.ErrNotFound
 	}
 
-	if rkey.KType != core.TypeString.Value() {
+	if row.KType != core.TypeString.Value() {
 		return core.Value{}, core.ErrKeyType
 	}
-
-	var result struct {
-		Value []byte
-	}
-	err = d.store.DB.Model(&store.RString{}).
-		Where("kid = ?", rkey.ID).
-		Select("kval as value").
-		First(&result).Error
-
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	if row.KVal == nil {
 		return core.Value{}, core.ErrNotFound
 	}
-	if err != nil {
-		return core.Value{}, err
-	}
-	return core.Value(result.Value), nil
+	return core.Value(row.KVal), nil
 }
 
 // GetMany returns a map of values for given keys.
@@ -125,81 +116,114 @@ func (d *DB) GetMany(keys ...string) (map[string]core.Value, error) {
 //
 // Uses SELECT FOR UPDATE to prevent race conditions in concurrent access.
 func (d *DB) Incr(key string, delta int) (int, error) {
-	var newVal int
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeString.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
-			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
-			}
-			newVal = delta
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: []byte(strconv.Itoa(delta)),
-			}
-			return tx.Create(&rstr).Error
-		}
-		if err != nil {
-			return err
-		}
+	value := 0
+	item := incrWriteItem{delta: delta, value: &value}
 
-		if rkey.KType != core.TypeString.Value() {
-			return core.ErrKeyType
-		}
+	err := d.store.TransactionWriteItems(context.Background(),
+		"string:incr:"+strconv.Itoa(d.dbIdx)+"\x00"+key, item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			run := func(tx *gorm.DB) error {
+				incs := make([]incrWriteItem, 0, len(items))
+				total := 0
+				for _, raw := range items {
+					inc := raw.(incrWriteItem)
+					incs = append(incs, inc)
+					total += inc.delta
+				}
 
-		var rstr store.RString
-		err = tx.Where("kid = ?", rkey.ID).First(&rstr).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			newVal = delta
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: []byte(strconv.Itoa(delta)),
+				now := time.Now().UnixMilli()
+				var current struct {
+					ID    int    `gorm:"column:id"`
+					KType int    `gorm:"column:ktype"`
+					KVal  []byte `gorm:"column:kval"`
+				}
+				currentQuery := tx.Model(&store.RKey{}).
+					Select("rkey.id, rkey.ktype, rstring.kval").
+					Joins("JOIN rstring ON rstring.kid = rkey.id").
+					Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key)
+				if dialect == store.DialectMySQL || dialect == store.DialectPostgres {
+					currentQuery = currentQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+				}
+				err := currentQuery.First(&current).Error
+
+				var final int
+				if err == nil {
+					if current.KType != core.TypeString.Value() {
+						return core.ErrKeyType
+					}
+					start, convErr := strconv.Atoi(string(current.KVal))
+					if convErr != nil {
+						return core.ErrValueType
+					}
+					final = d.assignIncrResults(incs, start)
+					if final == start {
+						return nil
+					}
+					return tx.Model(&store.RString{}).
+						Where("kid = ?", current.ID).
+						Update("kval", []byte(strconv.Itoa(final))).Error
+				}
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+
+				rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key,
+					core.TypeString.Value(), now, 1)
+				if err != nil {
+					return err
+				}
+				if rkey.KType != core.TypeString.Value() {
+					return core.ErrKeyType
+				}
+
+				var rstr store.RString
+				query := tx.Where("kid = ?", rkey.ID)
+				if dialect == store.DialectMySQL || dialect == store.DialectPostgres {
+					query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+				}
+				err = query.First(&rstr).Error
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					final = d.assignIncrResults(incs, 0)
+					rstr := store.RString{
+						KID:  rkey.ID,
+						KVal: []byte(strconv.Itoa(final)),
+					}
+					return tx.Create(&rstr).Error
+				}
+				if err != nil {
+					return err
+				}
+				start, convErr := strconv.Atoi(string(rstr.KVal))
+				if convErr != nil {
+					return core.ErrValueType
+				}
+				final = d.assignIncrResults(incs, start)
+				rstr.KVal = []byte(strconv.Itoa(final))
+				return tx.Save(&rstr).Error
 			}
-			if err := tx.Create(&rstr).Error; err != nil {
-				return err
+			if len(items) == 1 && !d.store.InTx() {
+				return tx.Transaction(func(tx *gorm.DB) error {
+					return run(tx)
+				})
 			}
-			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"modified_at": now,
-				}).Error
-		}
-		if err != nil {
-			return err
-		}
+			return run(tx)
+		})
 
-		valInt, err := strconv.Atoi(string(rstr.KVal))
-		if err != nil {
-			return core.ErrValueType
-		}
-		newVal = valInt + delta
+	return value, err
+}
 
-		rstr.KVal = []byte(strconv.Itoa(newVal))
-		if err := tx.Save(&rstr).Error; err != nil {
-			return err
-		}
-		return tx.Model(&store.RKey{}).
-			Where("id = ?", rkey.ID).
-			Updates(map[string]interface{}{
-				"kver":        gorm.Expr("kver + 1"),
-				"modified_at": now,
-			}).Error
-	})
+func (d *DB) assignIncrResults(items []incrWriteItem, start int) int {
+	current := start
+	for _, item := range items {
+		current += item.delta
+		*item.value = current
+	}
+	return current
+}
 
-	return newVal, err
+type incrWriteItem struct {
+	delta int
+	value *int
 }
 
 // IncrFloat increments the float key value by the specified amount.
@@ -208,81 +232,100 @@ func (d *DB) Incr(key string, delta int) (int, error) {
 // If the key value is not an float, returns ErrValueType.
 // If the key exists but is not a string, returns ErrKeyType.
 func (d *DB) IncrFloat(key string, delta float64) (float64, error) {
-	var newVal float64
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeString.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
+	newValue := 0.0
+	item := incrFloatWriteItem{delta: delta, value: &newValue}
+	err := d.store.TransactionWriteItems(context.Background(),
+		d.writeScope(key), item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			now := time.Now().UnixMilli()
+			incs := make([]incrFloatWriteItem, 0, len(items))
+			for _, raw := range items {
+				inc := raw.(incrFloatWriteItem)
+				incs = append(incs, inc)
 			}
-			if err := tx.Create(&rkey).Error; err != nil {
+
+			var current struct {
+				ID       int    `gorm:"column:id"`
+				KType    int    `gorm:"column:ktype"`
+				KVal     []byte `gorm:"column:kval"`
+				HasValue bool   `gorm:"column:has_value"`
+			}
+			query := tx.Model(&store.RKey{}).
+				Select("rkey.id, rkey.ktype, rstring.kval, rstring.kid IS NOT NULL AS has_value").
+				Joins("LEFT JOIN rstring ON rstring.kid = rkey.id").
+				Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key)
+			// PostgreSQL cannot lock the nullable side of this outer join.
+			if dialect == store.DialectMySQL {
+				query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			err := query.First(&current).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				rkey, err := store.EnsureKeyLocked(tx, dialect, d.dbIdx, key,
+					core.TypeString.Value(), now, 1)
+				if err != nil {
+					return err
+				}
+				current.ID = rkey.ID
+				current.KType = rkey.KType
+			} else if err != nil {
 				return err
 			}
-			newVal = delta
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
+			if current.KType != core.TypeString.Value() {
+				return core.ErrKeyType
 			}
-			return tx.Create(&rstr).Error
-		}
-		if err != nil {
-			return err
-		}
 
-		if rkey.KType != core.TypeString.Value() {
-			return core.ErrKeyType
-		}
-
-		var rstr store.RString
-		err = tx.Where("kid = ?", rkey.ID).First(&rstr).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			newVal = delta
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
+			start := 0.0
+			if current.HasValue {
+				start, err = strconv.ParseFloat(string(current.KVal), 64)
+				if err != nil {
+					return core.ErrValueType
+				}
 			}
-			if err := tx.Create(&rstr).Error; err != nil {
-				return err
+			final := d.assignIncrFloatResults(incs, start)
+			value := []byte(strconv.FormatFloat(final, 'f', -1, 64))
+			if current.HasValue {
+				if dialect == store.DialectMySQL {
+					return tx.Exec(
+						"UPDATE rstring AS s JOIN rkey AS k ON k.id = s.kid "+
+							"SET s.kval = ?, k.kver = k.kver + ?, k.modified_at = ? "+
+							"WHERE s.kid = ?",
+						value, len(items), now, current.ID,
+					).Error
+				}
+				if err := tx.Model(&store.RString{}).
+					Where("kid = ?", current.ID).
+					Update("kval", value).Error; err != nil {
+					return err
+				}
+			} else {
+				row := store.RString{KID: current.ID, KVal: value}
+				if err := tx.Create(&row).Error; err != nil {
+					return err
+				}
 			}
 			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
+				Where("id = ?", current.ID).
 				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
+					"kver":        gorm.Expr("kver + ?", len(items)),
 					"modified_at": now,
 				}).Error
-		}
-		if err != nil {
-			return err
-		}
+		})
 
-		valFloat, err := strconv.ParseFloat(string(rstr.KVal), 64)
-		if err != nil {
-			return core.ErrValueType
-		}
-		newVal = valFloat + delta
+	return newValue, err
+}
 
-		rstr.KVal = []byte(strconv.FormatFloat(newVal, 'f', -1, 64))
-		if err := tx.Save(&rstr).Error; err != nil {
-			return err
-		}
-		return tx.Model(&store.RKey{}).
-			Where("id = ?", rkey.ID).
-			Updates(map[string]interface{}{
-				"kver":        gorm.Expr("kver + 1"),
-				"modified_at": now,
-			}).Error
-	})
+func (d *DB) assignIncrFloatResults(items []incrFloatWriteItem, start float64) float64 {
+	current := start
+	for _, item := range items {
+		current += item.delta
+		*item.value = current
+	}
+	return current
+}
 
-	return newVal, err
+type incrFloatWriteItem struct {
+	delta float64
+	value *float64
 }
 
 // Set sets the key value that will not expire.
@@ -294,60 +337,18 @@ func (d *DB) Set(key string, value any) error {
 		return err
 	}
 
-	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
+	item := setWriteItem{value: vb}
+	return d.store.TransactionWriteItems(context.Background(),
+		d.writeScope(key), item,
+		func(tx *gorm.DB, _ store.Dialect, items []any) error {
+			last := items[len(items)-1].(setWriteItem)
+			if last.expireAt == nil {
+				return d.setNonBatched(tx, key, last.value)
+			}
+			return d.setExpireNonBatched(tx, key, last.value,
+				time.Duration(*last.expireAt-time.Now().UnixMilli())*time.Millisecond)
+		})
 
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeString.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
-			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
-			}
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: vb,
-			}
-			return tx.Create(&rstr).Error
-
-		case err != nil:
-			return err
-
-		case rkey.KType != core.TypeString.Value():
-			return core.ErrKeyType
-
-		default:
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: vb,
-			}
-			err = tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "kid"}},
-				DoUpdates: clause.AssignmentColumns([]string{"kval"}),
-			}).Create(&rstr).Error
-			if err != nil {
-				return err
-			}
-			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"expire_at":   nil,
-					"modified_at": now,
-					"klen":        1,
-				}).Error
-		}
-	})
 }
 
 // SetExpire sets the key value with an optional expiration time (if ttl > 0).
@@ -358,108 +359,222 @@ func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
 	if err != nil {
 		return err
 	}
+	if ttl <= 0 {
+		return d.Set(key, value)
+	}
+	expireAt := time.Now().UnixMilli() + ttl.Milliseconds()
+	item := setWriteItem{value: vb, expireAt: &expireAt}
+	return d.store.TransactionWriteItems(context.Background(),
+		d.writeScope(key), item,
+		func(tx *gorm.DB, _ store.Dialect, items []any) error {
+			last := items[len(items)-1].(setWriteItem)
+			if last.expireAt == nil {
+				return d.setNonBatched(tx, key, last.value)
+			}
+			return d.setExpireNonBatched(tx, key, last.value,
+				time.Duration(*last.expireAt-time.Now().UnixMilli())*time.Millisecond)
+		})
+}
 
-	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+type setWriteItem struct {
+	value    []byte
+	expireAt *int64
+}
+
+func (d *DB) setNonBatched(db *gorm.DB, key string, vb []byte) error {
+	if d.store.Dialect == store.DialectMySQL {
+		var result *gorm.DB
+		result = db.Exec(`
+			UPDATE rstring AS s
+			JOIN rkey AS k ON k.id = s.kid
+			SET s.kval = ?
+			WHERE k.kdb = ? AND k.kname = ?
+				AND k.ktype = ? AND k.expire_at IS NULL`,
+			vb, d.dbIdx, key, core.TypeString.Value())
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			return nil
+		}
+	}
+
+	var current struct {
+		ID       int    `gorm:"column:id"`
+		KType    int    `gorm:"column:ktype"`
+		ExpireAt *int64 `gorm:"column:expire_at"`
+		KVal     []byte `gorm:"column:kval"`
+	}
+	err := db.Model(&store.RKey{}).
+		Select("rkey.id, rkey.ktype, rkey.expire_at, rstring.kval").
+		Joins("LEFT JOIN rstring ON rstring.kid = rkey.id").
+		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
+		First(&current).Error
+	if err == nil && d.store.Dialect != store.DialectMySQL &&
+		current.KType == core.TypeString.Value() &&
+		current.ExpireAt == nil && bytes.Equal(current.KVal, vb) {
+		return nil
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		dialect := d.store.Dialect
 		now := time.Now().UnixMilli()
-		var expireAt *int64
-		if ttl > 0 {
-			expire := now + ttl.Milliseconds()
-			expireAt = &expire
+		var current struct {
+			ID       int    `gorm:"column:id"`
+			KType    int    `gorm:"column:ktype"`
+			ExpireAt *int64 `gorm:"column:expire_at"`
+			KVal     []byte `gorm:"column:kval"`
 		}
-
-		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeString.Value(),
-				KVer:       1,
-				ExpireAt:   expireAt,
-				ModifiedAt: now,
-				KLen:       1,
+			Select("rkey.id, rkey.ktype, rkey.expire_at, rstring.kval").
+			Joins("LEFT JOIN rstring ON rstring.kid = rkey.id").
+			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
+			First(&current).Error
+		if err == nil {
+			if current.KType != core.TypeString.Value() {
+				return core.ErrKeyType
 			}
-
-			// Try to create the key, handle unique constraint violation
-			err = tx.Create(&rkey).Error
-			if err != nil {
-				// Unique constraint violation - another transaction created the key
-				// Re-query to get the existing key
-				err = tx.Model(&store.RKey{}).
-					Where("kdb = ? AND kname = ?", d.dbIdx, key).
-					First(&rkey).Error
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					// Key expired between our create attempt and re-query
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-				// Update the existing key
-				if rkey.KType != core.TypeString.Value() {
-					return core.ErrKeyType
-				}
+			if current.KVal != nil && bytes.Equal(current.KVal, vb) && current.ExpireAt == nil {
+				return nil
 			}
-
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: vb,
-			}
-			err = tx.Clauses(clause.OnConflict{
+			rstr := store.RString{KID: current.ID, KVal: vb}
+			if err := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "kid"}},
 				DoUpdates: clause.AssignmentColumns([]string{"kval"}),
-			}).Create(&rstr).Error
-			if err != nil {
+			}).Create(&rstr).Error; err != nil {
 				return err
 			}
 			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
+				Where("id = ?", current.ID).
 				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"expire_at":   expireAt,
-					"modified_at": now,
-					"klen":        1,
-				}).Error
-
-		case err != nil:
-			return err
-
-		case rkey.KType != core.TypeString.Value():
-			return core.ErrKeyType
-
-		default:
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: vb,
-			}
-			err = tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "kid"}},
-				DoUpdates: clause.AssignmentColumns([]string{"kval"}),
-			}).Create(&rstr).Error
-			if err != nil {
-				return err
-			}
-			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"expire_at":   expireAt,
+					"expire_at":   nil,
 					"modified_at": now,
 					"klen":        1,
 				}).Error
 		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key,
+			core.TypeString.Value(), now, 1)
+		if err != nil {
+			return err
+		}
+		if rkey.KType != core.TypeString.Value() {
+			return core.ErrKeyType
+		}
+		rstr := store.RString{KID: rkey.ID, KVal: vb}
+		result := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "kid"}},
+			DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+		}).Create(&rstr)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 && rkey.ExpireAt == nil {
+			return nil
+		}
+		return tx.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"expire_at":   nil,
+				"modified_at": now,
+				"klen":        1,
+			}).Error
 	})
 }
 
-// SetMany sets the values of multiple keys.
-// Overwrites values for keys that already exist and
-// creates new keys/values for keys that do not exist.
-// Removes the TTL for existing keys.
-// If any of the keys exists but is not a string, returns ErrKeyType.
+func (d *DB) writeScope(key string) string {
+	return "string:write:" + strconv.Itoa(d.dbIdx) + "\x00" + key
+}
+
+func (d *DB) setExpireNonBatched(db *gorm.DB, key string, vb []byte, ttl time.Duration) error {
+	now := time.Now().UnixMilli()
+	expire := now + ttl.Milliseconds()
+	if d.store.Dialect == store.DialectMySQL {
+		result := db.Exec(`
+			UPDATE rkey AS k
+			JOIN rstring AS s ON s.kid = k.id
+			SET s.kval = ?, k.expire_at = ?, k.modified_at = ?
+			WHERE k.kdb = ? AND k.kname = ? AND k.ktype = ?`,
+			vb, expire, now, d.dbIdx, key, core.TypeString.Value())
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			return nil
+		}
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		dialect := d.store.Dialect
+		var current struct {
+			ID       int    `gorm:"column:id"`
+			KType    int    `gorm:"column:ktype"`
+			ExpireAt *int64 `gorm:"column:expire_at"`
+			KVal     []byte `gorm:"column:kval"`
+		}
+		err := tx.Model(&store.RKey{}).
+			Select("rkey.id, rkey.ktype, rkey.expire_at, rstring.kval").
+			Joins("LEFT JOIN rstring ON rstring.kid = rkey.id").
+			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
+			First(&current).Error
+		if err == nil {
+			if current.KType != core.TypeString.Value() {
+				return core.ErrKeyType
+			}
+			if current.KVal != nil && bytes.Equal(current.KVal, vb) &&
+				current.ExpireAt != nil && *current.ExpireAt == expire {
+				return nil
+			}
+			rstr := store.RString{KID: current.ID, KVal: vb}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "kid"}},
+				DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+			}).Create(&rstr).Error; err != nil {
+				return err
+			}
+			return tx.Model(&store.RKey{}).
+				Where("id = ?", current.ID).
+				Updates(map[string]interface{}{
+					"expire_at":   expire,
+					"modified_at": now,
+					"klen":        1,
+				}).Error
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key,
+			core.TypeString.Value(), now, 1)
+		if err != nil {
+			return err
+		}
+		if rkey.KType != core.TypeString.Value() {
+			return core.ErrKeyType
+		}
+		rstr := store.RString{KID: rkey.ID, KVal: vb}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "kid"}},
+			DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+		}).Create(&rstr).Error; err != nil {
+			return err
+		}
+		return tx.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"expire_at":   expire,
+				"modified_at": now,
+				"klen":        1,
+			}).Error
+	})
+}
+
 func (d *DB) SetMany(items map[string]any) error {
 	if len(items) == 0 {
 		return nil
@@ -479,106 +594,144 @@ func (d *DB) SetMany(items map[string]any) error {
 		keyNames = append(keyNames, k)
 	}
 
-	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		var existingKeys []store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname IN ?", d.dbIdx, keyNames).
-			Find(&existingKeys).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	sort.Strings(keyNames)
+	item := setManyWriteItem{values: values}
+	scope := "string:mset:" + strconv.Itoa(d.dbIdx) + "\x00"
+	for _, name := range keyNames {
+		// Length prefixes keep the routing scope unambiguous even when key
+		// names contain separator bytes.
+		scope += strconv.Itoa(len(name)) + ":" + name + "\x1f"
+	}
+
+	return d.store.TransactionWriteItems(context.Background(), scope, item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			final := make(map[string][]byte, len(values))
+			for _, raw := range items {
+				for name, value := range raw.(setManyWriteItem).values {
+					final[name] = value
+				}
+			}
+
+			if dialect == store.DialectMySQL {
+				if err := d.setManyBatchMySQL(tx, keyNames, final); err == nil {
+					return nil
+				} else if !errors.Is(err, core.ErrKeyType) {
+					return err
+				}
+			} else if dialect == store.DialectPostgres {
+				if err := d.setManyBatchPostgres(tx, keyNames, final); err == nil {
+					return nil
+				} else if !errors.Is(err, core.ErrKeyType) {
+					return err
+				}
+			} else if updated, err := d.updateSetManyFast(tx, keyNames, final); err != nil || updated {
+				return err
+			}
+			run := func(tx *gorm.DB) error {
+				return d.setManyTransactional(tx, dialect, keyNames, final)
+			}
+			if d.store.InTx() || len(items) > 1 {
+				return run(tx)
+			}
+			return tx.Transaction(run)
+		})
+}
+
+type setManyWriteItem struct {
+	values map[string][]byte
+}
+
+func (d *DB) setManyTransactional(tx *gorm.DB, dialect store.Dialect,
+	keyNames []string, values map[string][]byte) error {
+	now := time.Now().UnixMilli()
+	keys := make([]store.RKey, 0, len(keyNames))
+	rows := make([]store.RString, 0, len(keyNames))
+	for _, name := range keyNames {
+		rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, name,
+			core.TypeString.Value(), now, 1)
+		if err != nil {
 			return err
 		}
-
-		existingMap := make(map[string]store.RKey, len(existingKeys))
-		for _, k := range existingKeys {
-			existingMap[k.KName] = k
+		if rkey.KType != core.TypeString.Value() {
+			return core.ErrKeyType
 		}
+		keys = append(keys, rkey)
+		rows = append(rows, store.RString{KID: rkey.ID, KVal: values[name]})
+	}
 
-		var existingKeyNames []string
-		var newKeyNames []string
-		for k := range items {
-			if ek, ok := existingMap[k]; ok {
-				if ek.KType != core.TypeString.Value() {
-					return core.ErrKeyType
-				}
-				existingKeyNames = append(existingKeyNames, k)
-			} else {
-				newKeyNames = append(newKeyNames, k)
-			}
+	if err := tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "kid"}},
+		DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+	}).Create(&rows).Error; err != nil {
+		return err
+	}
+
+	for _, rkey := range keys {
+		if rkey.ExpireAt == nil && rkey.KLen == 1 {
+			continue
 		}
-
-		if len(existingKeyNames) > 0 {
-			err = tx.Model(&store.RKey{}).
-				Where("kdb = ? AND kname IN ?", d.dbIdx, existingKeyNames).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"expire_at":   nil,
-					"modified_at": now,
-					"klen":        1,
-				}).Error
-			if err != nil {
-				return err
-			}
-
-			rstrings := make([]store.RString, 0, len(existingKeyNames))
-			for _, k := range existingKeyNames {
-				rstrings = append(rstrings, store.RString{
-					KID:  existingMap[k].ID,
-					KVal: values[k],
-				})
-			}
-			err = tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "kid"}},
-				DoUpdates: clause.AssignmentColumns([]string{"kval"}),
-			}).Create(&rstrings).Error
-			if err != nil {
-				return err
-			}
+		if err := tx.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(map[string]interface{}{
+				"expire_at":   nil,
+				"modified_at": now,
+				"klen":        1,
+			}).Error; err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		if len(newKeyNames) > 0 {
-			rkeys := make([]store.RKey, 0, len(newKeyNames))
-			for _, k := range newKeyNames {
-				rkeys = append(rkeys, store.RKey{
-					KDB:        d.dbIdx,
-					KName:      k,
-					KType:      core.TypeString.Value(),
-					KVer:       1,
-					ExpireAt:   nil,
-					ModifiedAt: now,
-					KLen:       1,
-				})
-			}
-			err = tx.Create(&rkeys).Error
-			if err != nil {
-				return err
-			}
+// updateSetManyFast replaces values already known to be plain, existing string
+// keys in one statement. The count guard makes the statement all-or-nothing;
+// when any key is missing, expired, or has non-default metadata, callers use
+// the regular transactional path.
+func (d *DB) updateSetManyFast(db *gorm.DB, keyNames []string,
+	values map[string][]byte) (bool, error) {
+	if len(keyNames) == 0 {
+		return true, nil
+	}
 
-			var newKeys []store.RKey
-			err = tx.Where("kdb = ? AND kname IN ?", d.dbIdx, newKeyNames).Find(&newKeys).Error
-			if err != nil {
-				return err
-			}
+	var sql strings.Builder
+	var args []any
+	switch d.store.Dialect {
+	case store.DialectMySQL:
+		sql.WriteString("UPDATE rstring AS s JOIN rkey AS k ON k.id = s.kid SET s.kval = CASE k.kname")
+	case store.DialectPostgres:
+		sql.WriteString("UPDATE rstring AS s SET kval = CASE k.kname")
+	default:
+		// SQLite has no portable UPDATE...FROM shape here. Its small local
+		// writes are better served by the transactional implementation.
+		return false, nil
+	}
 
-			newKeyIDs := make(map[string]int, len(newKeys))
-			for _, k := range newKeys {
-				newKeyIDs[k.KName] = k.ID
-			}
-			rstrings := make([]store.RString, 0, len(newKeyNames))
-			for _, k := range newKeyNames {
-				rstrings = append(rstrings, store.RString{
-					KID:  newKeyIDs[k],
-					KVal: values[k],
-				})
-			}
-			err = tx.Create(&rstrings).Error
-			if err != nil {
-				return err
-			}
-		}
+	for _, name := range keyNames {
+		sql.WriteString(" WHEN ? THEN ?")
+		args = append(args, name, values[name])
+	}
+	sql.WriteString(" ELSE s.kval END")
 
-		return nil
-	})
+	var wherePrefix string
+	switch d.store.Dialect {
+	case store.DialectMySQL:
+		wherePrefix = " WHERE k.kdb = ? AND k.kname IN ? AND k.ktype = ? AND k.expire_at IS NULL AND k.klen = 1"
+	case store.DialectPostgres:
+		wherePrefix = " FROM rkey AS k WHERE k.id = s.kid AND k.kdb = ? AND k.kname IN ? AND k.ktype = ? AND k.expire_at IS NULL AND k.klen = 1"
+	default:
+		return false, nil
+	}
+	sql.WriteString(wherePrefix)
+	args = append(args, d.dbIdx, keyNames, core.TypeString.Value())
+
+	sql.WriteString(" AND (SELECT COUNT(*) FROM rkey AS k2 JOIN rstring AS s2 ON s2.kid = k2.id WHERE k2.kdb = ? AND k2.kname IN ? AND k2.ktype = ? AND k2.expire_at IS NULL AND k2.klen = ?) = ?")
+	args = append(args, d.dbIdx, keyNames, core.TypeString.Value(), 1, len(keyNames))
+
+	result := db.Exec(sql.String(), args...)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == int64(len(keyNames)), nil
 }
 
 // SetWith provides a builder pattern for setting values with additional options.
@@ -764,7 +917,7 @@ func (d *DB) SetNX(key string, value any) (bool, error) {
 // This implements SET key value NX EX seconds / PX milliseconds.
 func (d *DB) SetNXWithTTL(key string, value any, ttl time.Duration) (bool, error) {
 	var created bool
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var expireAt *int64
@@ -778,43 +931,26 @@ func (d *DB) SetNXWithTTL(key string, value any, ttl time.Duration) (bool, error
 			return err
 		}
 
-		var rkey store.RKey
-		err = tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-
-		if err == nil {
-			if rkey.KType != core.TypeString.Value() {
-				return core.ErrKeyType
+		rkey, inserted, err := store.InsertKeyIfAbsent(tx, dialect, d.dbIdx, key,
+			core.TypeString.Value(), now, 1)
+		if err != nil {
+			return err
+		}
+		if inserted {
+			if err := tx.Create(&store.RString{KID: rkey.ID, KVal: vb}).Error; err != nil {
+				return err
 			}
-			return nil
+			created = true
+			if expireAt == nil {
+				return nil
+			}
+			return tx.Model(&store.RKey{}).
+				Where("id = ?", rkey.ID).
+				Update("expire_at", expireAt).Error
 		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
+		if rkey.KType != core.TypeString.Value() {
+			return core.ErrKeyType
 		}
-
-		rkey = store.RKey{
-			KDB:        d.dbIdx,
-			KName:      key,
-			KType:      core.TypeString.Value(),
-			KVer:       1,
-			ExpireAt:   expireAt,
-			ModifiedAt: now,
-			KLen:       1,
-		}
-		if err := tx.Create(&rkey).Error; err != nil {
-			return err
-		}
-
-		rstr := store.RString{
-			KID:  rkey.ID,
-			KVal: vb,
-		}
-		if err := tx.Create(&rstr).Error; err != nil {
-			return err
-		}
-
-		created = true
 		return nil
 	})
 
@@ -835,7 +971,7 @@ func (d *DB) SetXX(key string, value any) (bool, error) {
 // This implements SET key value XX EX seconds / PX milliseconds.
 func (d *DB) SetXXWithTTL(key string, value any, ttl time.Duration) (bool, error) {
 	var updated bool
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var expireAt *int64
@@ -897,7 +1033,7 @@ func (d *DB) SetXXWithTTL(key string, value any, ttl time.Duration) (bool, error
 func (d *DB) SetNXGet(key string, value any, ttl time.Duration) (core.Value, bool, error) {
 	var prev core.Value
 	var created bool
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var expireAt *int64
@@ -973,7 +1109,7 @@ func (d *DB) SetNXGet(key string, value any, ttl time.Duration) (core.Value, boo
 func (d *DB) SetXXGet(key string, value any, ttl time.Duration) (core.Value, bool, error) {
 	var prev core.Value
 	var updated bool
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var expireAt *int64
@@ -1037,74 +1173,121 @@ func (d *DB) SetXXGet(key string, value any, ttl time.Duration) (core.Value, boo
 // This is the Redis SET with GET option implementation (added in Redis 6.2).
 // Time complexity: O(1)
 func (d *DB) SetGet(key string, value any) (core.Value, error) {
-	var prev core.Value
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
+	vb, err := core.ToBytes(value)
+	if err != nil {
+		return nil, err
+	}
 
-		vb, err := core.ToBytes(value)
-		if err != nil {
-			return err
-		}
+	prev := core.Value(nil)
+	item := setGetWriteItem{value: vb, prev: &prev}
+	err = d.store.TransactionWriteItems(context.Background(), d.writeScope(key), item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			run := func(tx *gorm.DB) error {
+				now := time.Now().UnixMilli()
+				var current struct {
+					ID       int    `gorm:"column:id"`
+					KType    int    `gorm:"column:ktype"`
+					KVal     []byte `gorm:"column:kval"`
+					HasValue bool   `gorm:"column:has_value"`
+				}
+				query := tx.Model(&store.RKey{}).
+					Select("rkey.id, rkey.ktype, rstring.kval, rstring.kid IS NOT NULL AS has_value").
+					Joins("LEFT JOIN rstring ON rstring.kid = rkey.id").
+					Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key)
+				err := query.First(&current).Error
+				if err == nil {
+					if current.KType != core.TypeString.Value() {
+						return core.ErrKeyType
+					}
 
-		var rkey store.RKey
-		err = tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
+					currentValue := core.Value(current.KVal)
+					var final []byte
+					for _, raw := range items {
+						setGet := raw.(setGetWriteItem)
+						*setGet.prev = currentValue
+						currentValue = core.Value(setGet.value)
+						final = setGet.value
+					}
+					if current.HasValue && dialect == store.DialectMySQL {
+						return tx.Exec(
+							"UPDATE rstring AS s JOIN rkey AS k ON k.id = s.kid "+
+								"SET s.kval = ?, k.kver = k.kver + ?, k.expire_at = NULL, "+
+								"k.modified_at = ?, k.klen = 1 WHERE s.kid = ?",
+							final, len(items), now, current.ID,
+						).Error
+					}
 
-		if err == nil {
-			if rkey.KType != core.TypeString.Value() {
-				return core.ErrKeyType
+					if current.HasValue {
+						if err := tx.Model(&store.RString{}).
+							Where("kid = ?", current.ID).
+							Update("kval", final).Error; err != nil {
+							return err
+						}
+					} else {
+						row := store.RString{KID: current.ID, KVal: final}
+						if err := tx.Create(&row).Error; err != nil {
+							return err
+						}
+					}
+					return tx.Model(&store.RKey{}).
+						Where("id = ?", current.ID).
+						Updates(map[string]interface{}{
+							"kver":        gorm.Expr("kver + ?", len(items)),
+							"expire_at":   nil,
+							"modified_at": now,
+							"klen":        1,
+						}).Error
+				}
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+
+				rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key,
+					core.TypeString.Value(), now, 1)
+				if err != nil {
+					return err
+				}
+				if rkey.KType != core.TypeString.Value() {
+					return core.ErrKeyType
+				}
+
+				currentValue := core.Value(nil)
+				var final []byte
+				for _, raw := range items {
+					setGet := raw.(setGetWriteItem)
+					*setGet.prev = currentValue
+					currentValue = core.Value(setGet.value)
+					final = setGet.value
+				}
+				row := store.RString{KID: rkey.ID, KVal: final}
+				if err := tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "kid"}},
+					DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+				}).Create(&row).Error; err != nil {
+					return err
+				}
+				return tx.Model(&store.RKey{}).
+					Where("id = ?", rkey.ID).
+					Updates(map[string]interface{}{
+						"kver":        gorm.Expr("kver + ?", len(items)),
+						"expire_at":   nil,
+						"modified_at": now,
+						"klen":        1,
+					}).Error
 			}
-
-			var rstr store.RString
-			err = tx.Where("kid = ?", rkey.ID).First(&rstr).Error
-			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
+			if len(items) == 1 && !d.store.InTx() && dialect != store.DialectMySQL {
+				return tx.Transaction(func(tx *gorm.DB) error {
+					return run(tx)
+				})
 			}
-			if err == nil {
-				prev = core.Value(rstr.KVal)
-			}
-
-			rstr.KVal = vb
-			err = tx.Save(&rstr).Error
-			if err != nil {
-				return err
-			}
-
-			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"expire_at":   nil,
-					"modified_at": now,
-					"klen":        1,
-				}).Error
-		}
-
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-
-		rkey = store.RKey{
-			KDB:        d.dbIdx,
-			KName:      key,
-			KType:      core.TypeString.Value(),
-			KVer:       1,
-			ModifiedAt: now,
-			KLen:       1,
-		}
-		if err := tx.Create(&rkey).Error; err != nil {
-			return err
-		}
-
-		rstr := store.RString{
-			KID:  rkey.ID,
-			KVal: vb,
-		}
-		return tx.Create(&rstr).Error
-	})
-
+			return run(tx)
+		})
 	return prev, err
+}
+
+type setGetWriteItem struct {
+	value []byte
+	prev  *core.Value
 }
 
 // SetKeepTTL sets the key to hold string value while keeping the existing TTL.
@@ -1113,7 +1296,7 @@ func (d *DB) SetGet(key string, value any) (core.Value, error) {
 // Time complexity: O(1)
 func (d *DB) SetKeepTTL(key string, value any) (bool, error) {
 	var updated bool
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		vb, err := core.ToBytes(value)
@@ -1208,80 +1391,160 @@ func (d *DB) StrLen(key string) (int, error) {
 
 // Append appends the value to the existing string value.
 // Returns the length of the string after appending.
-// This method uses transaction with row-level locking to prevent race conditions.
 func (d *DB) Append(key string, value []byte) (int, error) {
-	var newLen int
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeString.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
-			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
-			}
-
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: value,
-			}
-			if err := tx.Create(&rstr).Error; err != nil {
-				return err
-			}
-			newLen = len(value)
-			return nil
-
-		case err != nil:
-			return err
-
-		case rkey.KType != core.TypeString.Value():
-			return core.ErrKeyType
-
-		default:
-			var rstr store.RString
-			err = tx.Where("kid = ?", rkey.ID).First(&rstr).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				rstr = store.RString{
-					KID:  rkey.ID,
-					KVal: value,
+	newLen := 0
+	item := appendWriteItem{value: value, length: &newLen}
+	err := d.store.TransactionWriteItems(context.Background(), d.writeScope(key), item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			run := func(tx *gorm.DB) error {
+				now := time.Now().UnixMilli()
+				var current struct {
+					ID       int    `gorm:"column:id"`
+					KType    int    `gorm:"column:ktype"`
+					ExpireAt *int64 `gorm:"column:expire_at"`
+					KVal     []byte `gorm:"column:kval"`
+					Len      int    `gorm:"column:len"`
+					HasValue bool   `gorm:"column:has_value"`
 				}
-				if err := tx.Create(&rstr).Error; err != nil {
+
+				combined := make([]byte, 0)
+				for _, raw := range items {
+					combined = append(combined, raw.(appendWriteItem).value...)
+				}
+
+				if dialect == store.DialectMySQL {
+					result := tx.Exec(
+						"UPDATE rstring AS s JOIN rkey AS k ON k.id = s.kid "+
+							"SET s.kval = CONCAT(s.kval, ?), k.kver = k.kver + ?, "+
+							"k.modified_at = ? WHERE k.kdb = ? AND k.kname = ? "+
+							"AND k.ktype = ? AND (k.expire_at IS NULL OR k.expire_at > ?)",
+						combined, len(items), now, d.dbIdx, key,
+						core.TypeString.Value(), now,
+					)
+					if result.Error != nil {
+						return result.Error
+					}
+					if result.RowsAffected > 0 {
+						var final struct {
+							Len int `gorm:"column:len"`
+						}
+						if err := tx.Raw(
+							"SELECT LENGTH(s.kval) AS len FROM rstring AS s "+
+								"JOIN rkey AS k ON k.id = s.kid "+
+								"WHERE k.kdb = ? AND k.kname = ?",
+							d.dbIdx, key,
+						).Scan(&final).Error; err != nil {
+							return err
+						}
+						lengths := make([]int, len(items))
+						later := 0
+						for i := len(items) - 1; i >= 0; i-- {
+							lengths[i] = final.Len - later
+							later += len(items[i].(appendWriteItem).value)
+						}
+						for i, raw := range items {
+							*raw.(appendWriteItem).length = lengths[i]
+						}
+						return nil
+					}
+				}
+
+				selectColumns := "rkey.id, rkey.ktype, rkey.expire_at, rstring.kval, rstring.kid IS NOT NULL AS has_value"
+				if dialect == store.DialectMySQL {
+					selectColumns = "rkey.id, rkey.ktype, rkey.expire_at, LENGTH(rstring.kval) AS len, rstring.kid IS NOT NULL AS has_value"
+				}
+				query := tx.Model(&store.RKey{}).
+					Select(selectColumns).
+					Joins("LEFT JOIN rstring ON rstring.kid = rkey.id").
+					Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key)
+				// PostgreSQL cannot lock the nullable side of this outer join.
+				if dialect == store.DialectMySQL {
+					query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+				}
+				err := query.First(&current).Error
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					rkey, err := store.EnsureKeyLocked(tx, dialect, d.dbIdx, key,
+						core.TypeString.Value(), now, 1)
+					if err != nil {
+						return err
+					}
+					current.ID = rkey.ID
+					current.KType = rkey.KType
+				} else if err != nil {
 					return err
 				}
-				newLen = len(value)
-			} else if err != nil {
-				return err
-			} else {
-				newVal := append(rstr.KVal, value...)
-				rstr.KVal = newVal
-				if err := tx.Save(&rstr).Error; err != nil {
-					return err
+				if current.KType != core.TypeString.Value() {
+					return core.ErrKeyType
 				}
-				newLen = len(newVal)
-			}
+				expired := current.ExpireAt != nil && *current.ExpireAt <= now
+				if expired {
+					current.HasValue = false
+					current.KVal = nil
+					current.Len = 0
+				}
 
-			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
+				currentLen := current.Len
+				if dialect != store.DialectMySQL {
+					currentLen = len(current.KVal)
+				}
+				for _, raw := range items {
+					appendItem := raw.(appendWriteItem)
+					currentLen += len(appendItem.value)
+					*appendItem.length = currentLen
+				}
+
+				if current.HasValue && dialect == store.DialectMySQL {
+					return tx.Exec(
+						"UPDATE rstring AS s JOIN rkey AS k ON k.id = s.kid "+
+							"SET s.kval = CONCAT(s.kval, ?), k.kver = k.kver + ?, k.modified_at = ? "+
+							"WHERE s.kid = ?",
+						combined, len(items), now, current.ID,
+					).Error
+				}
+
+				value := current.KVal
+				value = append(value, combined...)
+				if value == nil {
+					value = []byte{}
+				}
+				row := store.RString{KID: current.ID, KVal: value}
+				if current.HasValue {
+					if err := tx.Model(&store.RString{}).
+						Where("kid = ?", current.ID).
+						Update("kval", value).Error; err != nil {
+						return err
+					}
+				} else {
+					if expired {
+						if err := tx.Where("kid = ?", current.ID).
+							Delete(&store.RString{}).Error; err != nil {
+							return err
+						}
+					}
+					if err := tx.Create(&row).Error; err != nil {
+						return err
+					}
+				}
+				updates := map[string]interface{}{
+					"kver":        gorm.Expr("kver + ?", len(items)),
 					"modified_at": now,
-				}).Error
-		}
-	})
-
+				}
+				if expired {
+					updates["expire_at"] = nil
+					updates["klen"] = 1
+				}
+				return tx.Model(&store.RKey{}).
+					Where("id = ?", current.ID).
+					Updates(updates).Error
+			}
+			return run(tx)
+		})
 	return newLen, err
+}
+
+type appendWriteItem struct {
+	value  []byte
+	length *int
 }
 
 // SetRange overwrites the part of the string starting at offset with the value.
@@ -1292,95 +1555,93 @@ func (d *DB) SetRange(key string, offset int, value []byte) (int, error) {
 		return 0, core.ErrArgument
 	}
 
-	var newLen int
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-
-		var existingBytes []byte
-
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeString.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
-			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
-			}
-
-			existingBytes = make([]byte, offset)
-			existingBytes = append(existingBytes, value...)
-
-			rstr := store.RString{
-				KID:  rkey.ID,
-				KVal: existingBytes,
-			}
-			if err := tx.Create(&rstr).Error; err != nil {
-				return err
-			}
-			newLen = len(existingBytes)
-			return nil
-
-		case err != nil:
-			return err
-
-		case rkey.KType != core.TypeString.Value():
-			return core.ErrKeyType
-
-		default:
-			var rstr store.RString
-			err = tx.Where("kid = ?", rkey.ID).First(&rstr).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				existingBytes = make([]byte, offset)
-				existingBytes = append(existingBytes, value...)
-
-				newRstr := store.RString{
-					KID:  rkey.ID,
-					KVal: existingBytes,
+	newLen := 0
+	item := setRangeWriteItem{offset: offset, value: value, length: &newLen}
+	err := d.store.TransactionWriteItems(context.Background(), d.writeScope(key), item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			run := func(tx *gorm.DB) error {
+				now := time.Now().UnixMilli()
+				var current struct {
+					ID       int    `gorm:"column:id"`
+					KType    int    `gorm:"column:ktype"`
+					KVal     []byte `gorm:"column:kval"`
+					HasValue bool   `gorm:"column:has_value"`
 				}
-				if err := tx.Create(&newRstr).Error; err != nil {
+				query := tx.Model(&store.RKey{}).
+					Select("rkey.id, rkey.ktype, rstring.kval, rstring.kid IS NOT NULL AS has_value").
+					Joins("LEFT JOIN rstring ON rstring.kid = rkey.id").
+					Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key)
+				// PostgreSQL cannot lock the nullable side of this outer join.
+				if dialect == store.DialectMySQL {
+					query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+				}
+				err := query.First(&current).Error
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					rkey, err := store.EnsureKeyLocked(tx, dialect, d.dbIdx, key,
+						core.TypeString.Value(), now, 1)
+					if err != nil {
+						return err
+					}
+					current.ID = rkey.ID
+					current.KType = rkey.KType
+				} else if err != nil {
 					return err
 				}
-			} else if err != nil {
-				return err
-			} else {
-				existingBytes = rstr.KVal
-				if offset > len(existingBytes) {
-					existingBytes = append(existingBytes, make([]byte, offset-len(existingBytes))...)
+				if current.KType != core.TypeString.Value() {
+					return core.ErrKeyType
 				}
 
-				if offset+len(value) > len(existingBytes) {
-					existingBytes = append(existingBytes[:offset], value...)
-				} else {
-					copy(existingBytes[offset:], value)
+				value := current.KVal
+				for _, raw := range items {
+					rangeItem := raw.(setRangeWriteItem)
+					if rangeItem.offset > len(value) {
+						value = append(value, make([]byte, rangeItem.offset-len(value))...)
+					}
+					end := rangeItem.offset + len(rangeItem.value)
+					if end > len(value) {
+						value = append(value, make([]byte, end-len(value))...)
+					}
+					copy(value[rangeItem.offset:end], rangeItem.value)
+					*rangeItem.length = len(value)
 				}
 
-				rstr.KVal = existingBytes
-				if err := tx.Save(&rstr).Error; err != nil {
+				if current.HasValue && dialect == store.DialectMySQL {
+					return tx.Exec(
+						"UPDATE rstring AS s JOIN rkey AS k ON k.id = s.kid "+
+							"SET s.kval = ?, k.kver = k.kver + ?, k.expire_at = NULL, "+
+							"k.modified_at = ?, k.klen = 1 WHERE s.kid = ?",
+						value, len(items), now, current.ID,
+					).Error
+				}
+
+				row := store.RString{KID: current.ID, KVal: value}
+				if current.HasValue {
+					if err := tx.Model(&store.RString{}).
+						Where("kid = ?", current.ID).
+						Update("kval", value).Error; err != nil {
+						return err
+					}
+				} else if err := tx.Create(&row).Error; err != nil {
 					return err
 				}
+				return tx.Model(&store.RKey{}).
+					Where("id = ?", current.ID).
+					Updates(map[string]interface{}{
+						"kver":        gorm.Expr("kver + ?", len(items)),
+						"expire_at":   nil,
+						"modified_at": now,
+						"klen":        1,
+					}).Error
 			}
-			newLen = len(existingBytes)
-
-			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"modified_at": now,
-				}).Error
-		}
-	})
-
+			return run(tx)
+		})
 	return newLen, err
+}
+
+type setRangeWriteItem struct {
+	offset int
+	value  []byte
+	length *int
 }
 
 // GetRange returns a substring of the string value.
@@ -1423,4 +1684,146 @@ func (d *DB) GetRange(key string, start, end int) (core.Value, error) {
 	}
 
 	return core.Value(value[start : end+1]), nil
+}
+
+// setManyBatchMySQL replaces all keys in one or two statements: an
+// INSERT...ON DUPLICATE KEY UPDATE into rkey (with the string type already
+// known) plus a multi-row INSERT...ON DUPLICATE KEY UPDATE into rstring. The
+// rkey insert can fail for non-string keys with a duplicate-key error because
+// the (kdb, kname) unique key collides on ktype, so callers detect that and
+// fall back to the transactional path.
+func (d *DB) setManyBatchMySQL(db *gorm.DB, keyNames []string, values map[string][]byte) error {
+	if len(keyNames) == 0 {
+		return nil
+	}
+	now := time.Now().UnixMilli()
+
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO rkey (kdb, kname, ktype, kver, modified_at, klen, klist_head, klist_tail) VALUES ")
+	keyArgs := make([]any, 0, len(keyNames)*6)
+	for i, name := range keyNames {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString("(?, ?, ?, 1, ?, 1, NULL, NULL)")
+		keyArgs = append(keyArgs, d.dbIdx, name, core.TypeString.Value(), now)
+	}
+	sb.WriteString(" ON DUPLICATE KEY UPDATE modified_at = VALUES(modified_at), klen = VALUES(klen), expire_at = NULL")
+
+	if err := db.Exec(sb.String(), keyArgs...).Error; err != nil {
+		return err
+	}
+
+	var rows []struct {
+		ID    int    `gorm:"column:id"`
+		KName string `gorm:"column:kname"`
+		KType int    `gorm:"column:ktype"`
+	}
+	if err := db.Model(&store.RKey{}).
+		Select("id, kname, ktype").
+		Where("kdb = ? AND kname IN ?", d.dbIdx, keyNames).
+		Find(&rows).Error; err != nil {
+		return err
+	}
+
+	stringIDs := make([]any, 0, len(rows))
+	rstringRows := make([]store.RString, 0, len(rows))
+	for _, row := range rows {
+		if row.KType != core.TypeString.Value() {
+			return core.ErrKeyType
+		}
+		stringIDs = append(stringIDs, row.ID)
+		rstringRows = append(rstringRows, store.RString{
+			KID:  row.ID,
+			KVal: values[row.KName],
+		})
+	}
+
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "kid"}},
+		DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+	}).Create(&rstringRows).Error; err != nil {
+		return err
+	}
+
+	return db.Model(&store.RKey{}).
+		Where("id IN ?", stringIDs).
+		Where("expire_at IS NOT NULL OR kver > 1 OR klen != 1").
+		Updates(map[string]any{
+			"kver":        gorm.Expr("kver + 1"),
+			"expire_at":   nil,
+			"modified_at": now,
+			"klen":        1,
+		}).Error
+}
+
+func (d *DB) setManyBatchPostgres(db *gorm.DB, keyNames []string, values map[string][]byte) error {
+	if len(keyNames) == 0 {
+		return nil
+	}
+	now := time.Now().UnixMilli()
+
+	rkeyRows := make([]store.RKey, 0, len(keyNames))
+	for _, name := range keyNames {
+		rkeyRows = append(rkeyRows, store.RKey{
+			KDB:        d.dbIdx,
+			KName:      name,
+			KType:      core.TypeString.Value(),
+			KVer:       1,
+			ModifiedAt: now,
+			KLen:       1,
+		})
+	}
+	if err := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "kdb"}, {Name: "kname"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"modified_at": gorm.Expr("EXCLUDED.modified_at"),
+			"klen":        gorm.Expr("EXCLUDED.klen"),
+			"expire_at":   nil,
+		}),
+	}).Create(&rkeyRows).Error; err != nil {
+		return err
+	}
+
+	var rows []struct {
+		ID    int    `gorm:"column:id"`
+		KType int    `gorm:"column:ktype"`
+		KName string `gorm:"column:kname"`
+	}
+	if err := db.Model(&store.RKey{}).
+		Select("id, kname, ktype").
+		Where("kdb = ? AND kname IN ?", d.dbIdx, keyNames).
+		Find(&rows).Error; err != nil {
+		return err
+	}
+
+	rstringRows := make([]store.RString, 0, len(rows))
+	stringIDs := make([]any, 0, len(rows))
+	for _, row := range rows {
+		if row.KType != core.TypeString.Value() {
+			return core.ErrKeyType
+		}
+		stringIDs = append(stringIDs, row.ID)
+		rstringRows = append(rstringRows, store.RString{
+			KID:  row.ID,
+			KVal: values[row.KName],
+		})
+	}
+
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "kid"}},
+		DoUpdates: clause.AssignmentColumns([]string{"kval"}),
+	}).Create(&rstringRows).Error; err != nil {
+		return err
+	}
+
+	return db.Model(&store.RKey{}).
+		Where("id IN ?", stringIDs).
+		Where("expire_at IS NOT NULL OR kver > 1 OR klen != 1").
+		Updates(map[string]any{
+			"kver":        gorm.Expr("kver + 1"),
+			"expire_at":   nil,
+			"modified_at": now,
+			"klen":        1,
+		}).Error
 }

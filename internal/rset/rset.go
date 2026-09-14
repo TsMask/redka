@@ -7,11 +7,14 @@ import (
 	"errors"
 	"math/rand"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
 	"github.com/tsmask/redka/internal/store"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ScanResult represents the result of a scan operation.
@@ -80,76 +83,117 @@ func (d *DB) Add(key string, elems ...any) (int, error) {
 		return 0, err
 	}
 
-	newCount := 0
+	if len(elembs) == 1 {
+		exists, err := d.Exists(key, elems[0])
+		if err != nil {
+			return 0, err
+		}
+		if exists {
+			return 0, nil
+		}
+	}
 
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-		switch {
-		case err == nil:
+	var newCount int
+	item := setAddWriteItem{elems: elembs, count: &newCount}
+	err = d.store.TransactionWriteItems(context.Background(),
+		"set:add:"+strconv.Itoa(d.dbIdx)+"\x00"+key, item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			now := time.Now().UnixMilli()
+			rkey, err := d.lockOrCreateSetKey(tx, dialect, key, now)
+			if err != nil {
+				return err
+			}
 			if rkey.KType != core.TypeSet.Value() {
 				return core.ErrKeyType
 			}
-			if err := tx.Model(&rkey).Updates(map[string]interface{}{
+
+			expired := rkey.ExpireAt != nil && *rkey.ExpireAt <= now
+			if expired {
+				if err := tx.Where("kid = ?", rkey.ID).
+					Delete(&store.RSet{}).Error; err != nil {
+					return err
+				}
+			}
+
+			uniqueElems := make(map[string]struct{})
+			for _, raw := range items {
+				for _, elem := range raw.(setAddWriteItem).elems {
+					uniqueElems[string(elem)] = struct{}{}
+				}
+			}
+			allElems := make([][]byte, 0, len(uniqueElems))
+			for elem := range uniqueElems {
+				allElems = append(allElems, []byte(elem))
+			}
+
+			var existing []store.RSet
+			if err := tx.Where("kid = ? AND elem IN ?", rkey.ID, allElems).
+				Find(&existing).Error; err != nil {
+				return err
+			}
+			existingElems := make(map[string]struct{}, len(existing))
+			for _, row := range existing {
+				existingElems[string(row.Elem)] = struct{}{}
+			}
+
+			newElems := make(map[string]struct{})
+			for _, raw := range items {
+				add := raw.(setAddWriteItem)
+				seen := make(map[string]struct{}, len(add.elems))
+				count := 0
+				for _, elem := range add.elems {
+					name := string(elem)
+					if _, ok := seen[name]; ok {
+						continue
+					}
+					seen[name] = struct{}{}
+					if _, ok := existingElems[name]; ok {
+						continue
+					}
+					if _, ok := newElems[name]; ok {
+						continue
+					}
+					newElems[name] = struct{}{}
+					count++
+				}
+				*add.count = count
+			}
+
+			rows := make([]store.RSet, 0, len(newElems))
+			for elem := range newElems {
+				rows = append(rows, store.RSet{KID: rkey.ID, Elem: []byte(elem)})
+			}
+			if len(rows) > 0 {
+				result := store.CreateIgnoreConflict(tx, dialect,
+					[]clause.Column{{Name: "kid"}, {Name: "elem"}}, &rows)
+				if result.Error != nil {
+					return result.Error
+				}
+			}
+			if len(rows) == 0 && !expired {
+				return nil
+			}
+
+			updates := map[string]interface{}{
 				"kver":        gorm.Expr("kver + 1"),
 				"modified_at": now,
-			}).Error; err != nil {
-				return err
 			}
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeSet.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       0,
+			if expired {
+				updates["expire_at"] = nil
+				updates["klen"] = len(rows)
+			} else if len(rows) > 0 {
+				updates["klen"] = gorm.Expr("klen + ?", len(rows))
 			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
-			}
-		default:
-			return err
-		}
-
-		// 批量查询已存在的元素，避免 N+1 查询
-		var existingElems []store.RSet
-		err = tx.Where("kid = ? AND elem IN ?", rkey.ID, elembs).Find(&existingElems).Error
-		if err != nil {
-			return err
-		}
-
-		// 构建已存在元素的集合
-		existMap := make(map[string]bool, len(existingElems))
-		for _, e := range existingElems {
-			existMap[string(e.Elem)] = true
-		}
-
-		// 批量插入新元素
-		var newElems []store.RSet
-		for _, elem := range elembs {
-			if !existMap[string(elem)] {
-				newElems = append(newElems, store.RSet{KID: rkey.ID, Elem: elem})
-				newCount++
-			}
-		}
-
-		if len(newElems) > 0 {
-			if err := tx.Create(&newElems).Error; err != nil {
-				return err
-			}
-		}
-
-		// 更新键的长度
-		return tx.Model(&store.RKey{}).
-			Where("id = ?", rkey.ID).
-			Update("klen", gorm.Expr("klen + ?", newCount)).Error
-	})
+			return tx.Model(&store.RKey{}).
+				Where("id = ?", rkey.ID).Updates(updates).Error
+		})
 
 	return newCount, err
+}
+
+type setAddWriteItem struct {
+	elems [][]byte
+	count *int
 }
 
 // Delete removes elements from a set.
@@ -209,54 +253,129 @@ func (d *DB) Diff(keys ...string) ([]core.Value, error) {
 	return d.diffTx(d.store.DB, keys...)
 }
 
-// diffTx computes the difference of sets within a transaction.
-// Used internally by DiffStore to ensure atomicity.
 func (d *DB) diffTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
-
-	now := time.Now().UnixMilli()
-	var results []store.RSet
-
-	err := db.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
-		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, keys[0]).
-		Scopes(store.NotExpired(now)).
-		Find(&results).Error
+	items, err := d.setElemsByKey(db, keys[0])
 	if err != nil {
 		return nil, err
 	}
-
-	if len(results) == 0 {
+	if len(items) == 0 {
 		return []core.Value{}, nil
 	}
-
-	elems := make(map[string]bool)
-	for _, r := range results {
-		elems[string(r.Elem)] = true
-	}
-
+	elems := setElemSet(items)
 	for _, key := range keys[1:] {
-		var results []store.RSet
-		err := db.Model(&store.RSet{}).
-			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
-			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
-			Find(&results).Error
+		removals, err := d.setElemsByKey(db, key)
 		if err != nil {
 			return nil, err
 		}
-		for _, r := range results {
-			delete(elems, string(r.Elem))
-		}
+		deleteElems(elems, removals)
+	}
+	return setValues(elems), nil
+}
+
+func (d *DB) setElemsByKey(db *gorm.DB, key string) ([]core.Value, error) {
+	now := time.Now().UnixMilli()
+	var rows []store.RSet
+	err := db.Model(&store.RSet{}).
+		Joins("JOIN rkey ON rkey.id = rset.kid AND rkey.ktype = ?", core.TypeSet.Value()).
+		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
+		Scopes(store.NotExpired(now)).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	items := make([]core.Value, len(rows))
+	for i, row := range rows {
+		items[i] = core.Value(row.Elem)
+	}
+	return items, nil
+}
+
+func setValues(elems map[string]struct{}) []core.Value {
+	items := make([]core.Value, 0, len(elems))
+	for elem := range elems {
+		items = append(items, core.Value(elem))
+	}
+	return items
+}
+
+// diffTx computes the difference of sets within a transaction.
+// Used internally by DiffStore to ensure atomicity.
+func (d *DB) diffTxFast(db *gorm.DB, keys ...string) ([]core.Value, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	sets, err := d.setsByKeys(db, keys...)
+	if err != nil {
+		return nil, err
+	}
+	return diffSetValues(sets, keys), nil
+}
+
+func diffSetValues(sets map[string][]core.Value, keys []string) []core.Value {
+	if len(sets[keys[0]]) == 0 {
+		return []core.Value{}
+	}
+
+	elems := setElemSet(sets[keys[0]])
+	for _, key := range keys[1:] {
+		deleteElems(elems, sets[key])
 	}
 
 	items := make([]core.Value, 0, len(elems))
 	for elem := range elems {
 		items = append(items, core.Value(elem))
 	}
-	return items, nil
+	return items
+}
+
+type setItemRow struct {
+	KeyName string `gorm:"column:key_name"`
+	Elem    []byte `gorm:"column:elem"`
+}
+
+func (d *DB) setsByKeys(db *gorm.DB, keys ...string) (map[string][]core.Value, error) {
+	if len(keys) == 0 {
+		return map[string][]core.Value{}, nil
+	}
+
+	now := time.Now().UnixMilli()
+	var rows []setItemRow
+	err := db.Model(&store.RSet{}).
+		Select("rkey.kname AS key_name, rset.elem").
+		Joins("JOIN rkey ON rkey.id = rset.kid AND rkey.ktype = ?", core.TypeSet.Value()).
+		Where("rkey.kdb = ? AND rkey.kname IN ?", d.dbIdx, keys).
+		Scopes(store.NotExpired(now)).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	sets := make(map[string][]core.Value, len(keys))
+	for _, key := range keys {
+		sets[key] = nil
+	}
+	for _, row := range rows {
+		sets[row.KeyName] = append(sets[row.KeyName], core.Value(row.Elem))
+	}
+	return sets, nil
+}
+
+func setElemSet(items []core.Value) map[string]struct{} {
+	elems := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		elems[string(item)] = struct{}{}
+	}
+	return elems
+}
+
+func deleteElems(elems map[string]struct{}, removals []core.Value) {
+	for _, item := range removals {
+		delete(elems, string(item))
+	}
 }
 
 // DiffStore calculates the difference and stores the result in a destination set.
@@ -266,58 +385,147 @@ func (d *DB) DiffStore(dest string, keys ...string) (int, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
+	return d.writeSetStore("diff", dest, keys,
+		func(tx *gorm.DB, dialect store.Dialect, keys []string) (int, error) {
+			return d.storeSetResult(tx, dialect, dest, func() ([]core.Value, error) {
+				return d.diffTxFast(tx, keys...)
+			})
+		})
+}
 
-	var resultCount int
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		// Calculate difference within the same transaction for atomicity
-		items, err := d.diffTx(tx, keys...)
-		if err != nil {
-			return err
-		}
+func (d *DB) writeScope(key string) string {
+	return "set:store:" + strconv.Itoa(d.dbIdx) + "\x00" + key
+}
 
-		var rkey store.RKey
-		err = tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
-			First(&rkey).Error
-		if err == nil && rkey.KType != core.TypeSet.Value() {
-			return core.ErrKeyType
-		}
+func (d *DB) writeSetStore(op, dest string, keys []string,
+	compute func(tx *gorm.DB, dialect store.Dialect, keys []string) (int, error)) (int, error) {
+	resultCount := 0
+	item := setStoreWriteItem{keys: keys, count: &resultCount}
+	err := d.store.TransactionWriteItems(context.Background(),
+		"set:store:"+op+":"+strconv.Itoa(d.dbIdx)+"\x00"+dest, item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			groups := make(map[string][]setStoreWriteItem)
+			order := make([]string, 0)
+			for _, raw := range items {
+				storeItem := raw.(setStoreWriteItem)
+				signature := setStoreKeysSignature(storeItem.keys)
+				if _, exists := groups[signature]; !exists {
+					order = append(order, signature)
+				}
+				groups[signature] = append(groups[signature], storeItem)
+			}
 
-		if err := tx.Where("kdb = ? AND kname = ?", d.dbIdx, dest).
-			Delete(&store.RKey{}).Error; err != nil {
-			return err
-		}
-
-		if len(items) == 0 {
+			for _, signature := range order {
+				group := groups[signature]
+				count, err := compute(tx, dialect, group[len(group)-1].keys)
+				if err != nil {
+					return err
+				}
+				for _, storeItem := range group {
+					*storeItem.count = count
+				}
+			}
 			return nil
-		}
-
-		rkey = store.RKey{
-			KDB:        d.dbIdx,
-			KName:      dest,
-			KType:      core.TypeSet.Value(),
-			KVer:       1,
-			ModifiedAt: now,
-			KLen:       len(items),
-		}
-		if err := tx.Create(&rkey).Error; err != nil {
-			return err
-		}
-
-		rsets := make([]store.RSet, len(items))
-		for i, item := range items {
-			rsets[i] = store.RSet{KID: rkey.ID, Elem: []byte(item)}
-		}
-		if err := tx.Create(&rsets).Error; err != nil {
-			return err
-		}
-
-		resultCount = len(items)
-		return nil
-	})
-
+		})
 	return resultCount, err
+}
+
+func (d *DB) lockOrCreateSetKey(tx *gorm.DB, dialect store.Dialect,
+	name string, now int64) (store.RKey, error) {
+	key, err := store.LockKey(tx, dialect, d.dbIdx, name)
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return key, err
+	}
+	return store.EnsureKeyLocked(tx, dialect, d.dbIdx, name,
+		core.TypeSet.Value(), now, 0)
+}
+
+func setStoreKeysSignature(keys []string) string {
+	var signature strings.Builder
+	for _, key := range keys {
+		signature.WriteString(strconv.Itoa(len(key)))
+		signature.WriteByte(':')
+		signature.WriteString(key)
+		signature.WriteByte('\x1f')
+	}
+	return signature.String()
+}
+
+type setStoreWriteItem struct {
+	keys  []string
+	count *int
+}
+
+func (d *DB) storeSetResult(tx *gorm.DB, dialect store.Dialect, dest string, compute func() ([]core.Value, error)) (int, error) {
+	now := time.Now().UnixMilli()
+	rkey, err := d.lockOrCreateSetKey(tx, dialect, dest, now)
+	if err != nil {
+		return 0, err
+	}
+	if rkey.KType != core.TypeSet.Value() {
+		return 0, core.ErrKeyType
+	}
+	expired := rkey.ExpireAt != nil && *rkey.ExpireAt <= now
+
+	items, err := compute()
+	if err != nil {
+		return 0, err
+	}
+
+	var existing []store.RSet
+	if err := tx.Where("kid = ?", rkey.ID).Find(&existing).Error; err != nil {
+		return 0, err
+	}
+	if !expired {
+		existingElems := make(map[string]struct{}, len(existing))
+		for _, row := range existing {
+			existingElems[string(row.Elem)] = struct{}{}
+		}
+		resultElems := make(map[string]struct{}, len(items))
+		for _, item := range items {
+			resultElems[string(item)] = struct{}{}
+		}
+		if len(existingElems) == len(resultElems) {
+			unchanged := true
+			for elem := range resultElems {
+				if _, ok := existingElems[elem]; !ok {
+					unchanged = false
+					break
+				}
+			}
+			if unchanged {
+				return len(items), nil
+			}
+		}
+	}
+
+	if err := tx.Where("kid = ?", rkey.ID).Delete(&store.RSet{}).Error; err != nil {
+		return 0, err
+	}
+	updates := map[string]any{
+		"kver":        gorm.Expr("kver + 1"),
+		"modified_at": now,
+		"klen":        len(items),
+	}
+	if expired {
+		updates["expire_at"] = nil
+	}
+	if len(items) == 0 {
+		return 0, tx.Model(&store.RKey{}).
+			Where("id = ?", rkey.ID).
+			Updates(updates).Error
+	}
+
+	rows := make([]store.RSet, len(items))
+	for i, item := range items {
+		rows[i] = store.RSet{KID: rkey.ID, Elem: []byte(item)}
+	}
+	if err := tx.Create(&rows).Error; err != nil {
+		return 0, err
+	}
+	return len(items), tx.Model(&store.RKey{}).
+		Where("id = ?", rkey.ID).
+		Updates(updates).Error
 }
 
 // Exists reports whether the element belongs to a set.
@@ -345,49 +553,62 @@ func (d *DB) Inter(keys ...string) ([]core.Value, error) {
 	return d.interTx(d.store.DB, keys...)
 }
 
-// interTx computes the intersection of sets within a transaction.
-// Used internally by InterStore to ensure atomicity.
 func (d *DB) interTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
-
-	now := time.Now().UnixMilli()
-
-	var results []store.RSet
-	err := db.Model(&store.RSet{}).
-		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
-		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, keys[0]).
-		Scopes(store.NotExpired(now)).
-		Find(&results).Error
+	items, err := d.setElemsByKey(db, keys[0])
 	if err != nil {
 		return nil, err
 	}
-
-	if len(results) == 0 {
+	if len(items) == 0 {
 		return []core.Value{}, nil
 	}
-
-	elems := make(map[string]bool)
-	for _, r := range results {
-		elems[string(r.Elem)] = true
-	}
-
+	elems := setElemSet(items)
 	for _, key := range keys[1:] {
-		var results []store.RSet
-		err := db.Model(&store.RSet{}).
-			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
-			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
-			Find(&results).Error
+		items, err := d.setElemsByKey(db, key)
 		if err != nil {
 			return nil, err
 		}
+		temp := make(map[string]struct{}, len(elems))
+		for _, item := range items {
+			if _, ok := elems[string(item)]; ok {
+				temp[string(item)] = struct{}{}
+			}
+		}
+		elems = temp
+		if len(elems) == 0 {
+			break
+		}
+	}
+	return setValues(elems), nil
+}
 
-		temp := make(map[string]bool)
-		for _, r := range results {
-			if elems[string(r.Elem)] {
-				temp[string(r.Elem)] = true
+// interTx computes the intersection of sets within a transaction.
+// Used internally by InterStore to ensure atomicity.
+func (d *DB) interTxFast(db *gorm.DB, keys ...string) ([]core.Value, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	sets, err := d.setsByKeys(db, keys...)
+	if err != nil {
+		return nil, err
+	}
+	return interSetValues(sets, keys), nil
+}
+
+func interSetValues(sets map[string][]core.Value, keys []string) []core.Value {
+	if len(sets[keys[0]]) == 0 {
+		return []core.Value{}
+	}
+
+	elems := setElemSet(sets[keys[0]])
+	for _, key := range keys[1:] {
+		temp := make(map[string]struct{}, len(elems))
+		for _, item := range sets[key] {
+			if _, ok := elems[string(item)]; ok {
+				temp[string(item)] = struct{}{}
 			}
 		}
 		elems = temp
@@ -400,7 +621,7 @@ func (d *DB) interTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	for elem := range elems {
 		items = append(items, core.Value(elem))
 	}
-	return items, nil
+	return items
 }
 
 // InterStore intersects multiple sets and stores the result in a destination set.
@@ -410,58 +631,12 @@ func (d *DB) InterStore(dest string, keys ...string) (int, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
-
-	var resultCount int
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		// Calculate intersection within the same transaction for atomicity
-		items, err := d.interTx(tx, keys...)
-		if err != nil {
-			return err
-		}
-
-		var rkey store.RKey
-		err = tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
-			First(&rkey).Error
-		if err == nil && rkey.KType != core.TypeSet.Value() {
-			return core.ErrKeyType
-		}
-
-		if err := tx.Where("kdb = ? AND kname = ?", d.dbIdx, dest).
-			Delete(&store.RKey{}).Error; err != nil {
-			return err
-		}
-
-		if len(items) == 0 {
-			return nil
-		}
-
-		rkey = store.RKey{
-			KDB:        d.dbIdx,
-			KName:      dest,
-			KType:      core.TypeSet.Value(),
-			KVer:       1,
-			ModifiedAt: now,
-			KLen:       len(items),
-		}
-		if err := tx.Create(&rkey).Error; err != nil {
-			return err
-		}
-
-		rsets := make([]store.RSet, len(items))
-		for i, item := range items {
-			rsets[i] = store.RSet{KID: rkey.ID, Elem: []byte(item)}
-		}
-		if err := tx.Create(&rsets).Error; err != nil {
-			return err
-		}
-
-		resultCount = len(items)
-		return nil
-	})
-
-	return resultCount, err
+	return d.writeSetStore("inter", dest, keys,
+		func(tx *gorm.DB, dialect store.Dialect, keys []string) (int, error) {
+			return d.storeSetResult(tx, dialect, dest, func() ([]core.Value, error) {
+				return d.interTxFast(tx, keys...)
+			})
+		})
 }
 
 // InterCard returns the number of elements in the intersection of multiple sets.
@@ -554,8 +729,29 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 		return false, err
 	}
 
+	// A missing source member is a successful SMOVE result (0), not an error.
+	// Checking it before locking both keys avoids hot repeated-move workloads.
+	var sourceRow struct {
+		ID int `gorm:"column:id"`
+	}
+	err = d.store.DB.Model(&store.RSet{}).
+		Select("rset.kid AS id").
+		Joins("JOIN rkey ON rkey.id = rset.kid").
+		Where("rkey.kdb = ? AND rkey.kname = ? AND rkey.ktype = ? AND rset.elem = ?",
+			d.dbIdx, src, core.TypeSet.Value(), elemb).
+		First(&sourceRow).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, core.ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	if src == dest {
+		return true, nil
+	}
+
 	var moved bool
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		// 死锁预防：按键名排序后加锁，确保固定的锁定顺序
@@ -566,10 +762,13 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 		secondKey := keys[1]
 
 		// 按排序后的顺序锁定键
+		keyQuery := tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname = ?", d.dbIdx, firstKey)
+		if dialect == store.DialectMySQL || dialect == store.DialectPostgres {
+			keyQuery = keyQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
 		var firstKeyRecord store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, firstKey).
-			First(&firstKeyRecord).Error
+		err := keyQuery.First(&firstKeyRecord).Error
 
 		// 根据 firstKey 是 src 还是 dest 来处理
 		var srcKey store.RKey
@@ -589,68 +788,67 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 			srcKey = firstKeyRecord
 
 			// 检查 dest 是否存在
-			err = tx.Model(&store.RKey{}).
-				Where("kdb = ? AND kname = ?", d.dbIdx, secondKey).
-				First(&destKey).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				destKey = store.RKey{
-					KDB:        d.dbIdx,
-					KName:      dest,
-					KType:      core.TypeSet.Value(),
-					KVer:       1,
-					ModifiedAt: now,
-					KLen:       0,
-				}
-				if err := tx.Create(&destKey).Error; err != nil {
-					return err
-				}
-			} else if err != nil {
+			destKey, err = store.EnsureKeyLocked(tx, dialect, d.dbIdx, dest,
+				core.TypeSet.Value(), now, 0)
+			if err != nil {
 				return err
-			} else if destKey.KType != core.TypeSet.Value() {
+			}
+			if destKey.KType != core.TypeSet.Value() {
 				return core.ErrKeyType
 			}
 		} else {
 			// firstKey 是 dest
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				// dest 不存在，创建它
-				destKey = store.RKey{
-					KDB:        d.dbIdx,
-					KName:      dest,
-					KType:      core.TypeSet.Value(),
-					KVer:       1,
-					ModifiedAt: now,
-					KLen:       0,
-				}
-				if err := tx.Create(&destKey).Error; err != nil {
+				destKey, err = store.EnsureKeyLocked(tx, dialect, d.dbIdx, dest,
+					core.TypeSet.Value(), now, 0)
+				if err != nil {
 					return err
 				}
 			} else if err != nil {
 				return err
-			} else if destKey.KType != core.TypeSet.Value() {
-				return core.ErrKeyType
+			} else {
+				if firstKeyRecord.KType != core.TypeSet.Value() {
+					return core.ErrKeyType
+				}
+				destKey = firstKeyRecord
 			}
-			destKey = firstKeyRecord
 
 			// 检查 src 是否存在
-			err = tx.Model(&store.RKey{}).
-				Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, secondKey, core.TypeSet.Value()).
-				First(&srcKey).Error
+			srcQuery := tx.Model(&store.RKey{}).
+				Where("kdb = ? AND kname = ?", d.dbIdx, secondKey)
+			if dialect == store.DialectMySQL || dialect == store.DialectPostgres {
+				srcQuery = srcQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			err = srcQuery.First(&srcKey).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return core.ErrNotFound
 			}
 			if err != nil {
 				return err
 			}
+			if srcKey.KType != core.TypeSet.Value() {
+				return core.ErrKeyType
+			}
 		}
 
 		// 检查源集合中是否存在该元素
+		srcElemQuery := tx.Model(&store.RSet{}).
+			Where("kid = ? AND elem = ?", srcKey.ID, elemb)
+		if dialect == store.DialectMySQL || dialect == store.DialectPostgres {
+			srcElemQuery = srcElemQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
 		var srcSet store.RSet
-		err = tx.Where("kid = ? AND elem = ?", srcKey.ID, elemb).First(&srcSet).Error
+		err = srcElemQuery.First(&srcSet).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return core.ErrNotFound
 		}
 		if err != nil {
 			return err
+		}
+
+		if src == dest {
+			moved = true
+			return nil
 		}
 
 		// 检查目标集合中是否已存在该元素
@@ -676,7 +874,9 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 		}
 
 		// 元素不存在于目标集合，移动元素
-		if err := tx.Create(&store.RSet{KID: destKey.ID, Elem: elemb}).Error; err != nil {
+		row := store.RSet{KID: destKey.ID, Elem: elemb}
+		if err := store.CreateIgnoreConflict(tx, dialect,
+			[]clause.Column{{Name: "kid"}, {Name: "elem"}}, &row).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("kid = ? AND elem = ?", srcKey.ID, elemb).
@@ -706,46 +906,70 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 
 // Pop removes and returns a random element from a set.
 func (d *DB) Pop(key string) (core.Value, error) {
-	var elem core.Value
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
+	elem := core.Value{}
+	err := error(nil)
+	item := setPopWriteItem{elem: &elem, err: &err}
+	err = d.store.TransactionWriteItems(context.Background(), d.writeScope(key), item,
+		func(tx *gorm.DB, _ store.Dialect, items []any) error {
+			now := time.Now().UnixMilli()
+			pops := make([]setPopWriteItem, 0, len(items))
+			for _, raw := range items {
+				pops = append(pops, raw.(setPopWriteItem))
+			}
 
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeSet.Value()).
-			First(&rkey).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return core.ErrNotFound
-		}
-		if err != nil {
-			return err
-		}
+			var rows []struct {
+				ID   int    `gorm:"column:id"`
+				Elem []byte `gorm:"column:elem"`
+			}
+			err := tx.Model(&store.RKey{}).
+				Select("rkey.id, rset.elem").
+				Joins("JOIN rset ON rset.kid = rkey.id").
+				Where("rkey.kdb = ? AND rkey.kname = ? AND rkey.ktype = ?",
+					d.dbIdx, key, core.TypeSet.Value()).
+				Limit(len(pops)).
+				Find(&rows).Error
+			if err != nil {
+				return err
+			}
 
-		var rset store.RSet
-		err = tx.Where("kid = ?", rkey.ID).First(&rset).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return core.ErrNotFound
-		}
-		if err != nil {
-			return err
-		}
+			for i, pop := range pops {
+				if i < len(rows) {
+					*pop.elem = core.Value(rows[i].Elem)
+					*pop.err = nil
+				} else {
+					*pop.elem = core.Value{}
+					*pop.err = core.ErrNotFound
+				}
+			}
+			if len(rows) == 0 {
+				return nil
+			}
 
-		elem = core.Value(rset.Elem)
-		if err := tx.Where("kid = ? AND elem = ?", rkey.ID, rset.Elem).
-			Delete(&store.RSet{}).Error; err != nil {
-			return err
-		}
+			keyID := rows[0].ID
+			elems := make([][]byte, len(rows))
+			for i, row := range rows {
+				elems[i] = row.Elem
+			}
+			if err := tx.Where("kid = ? AND elem IN ?", keyID, elems).
+				Delete(&store.RSet{}).Error; err != nil {
+				return err
+			}
 
-		return tx.Model(&store.RKey{}).
-			Where("id = ?", rkey.ID).
-			Updates(map[string]interface{}{
-				"kver":        gorm.Expr("kver + 1"),
-				"modified_at": now,
-				"klen":        gorm.Expr("klen - 1"),
-			}).Error
-	})
+			return tx.Model(&store.RKey{}).
+				Where("id = ?", keyID).
+				Updates(map[string]interface{}{
+					"kver":        gorm.Expr("kver + ?", len(rows)),
+					"modified_at": now,
+					"klen":        gorm.Expr("klen - ?", len(rows)),
+				}).Error
+		})
 
 	return elem, err
+}
+
+type setPopWriteItem struct {
+	elem *core.Value
+	err  *error
 }
 
 // Random returns a random element from a set.
@@ -755,8 +979,7 @@ func (d *DB) Random(key string) (core.Value, error) {
 	err := d.store.DB.Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
-		Scopes(store.NotExpired(now)).
-		Order("RANDOM()").
+		Scopes(store.NotExpired(now), store.RandomOrder(d.store.Dialect)).
 		First(&rset).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -932,28 +1155,42 @@ func (d *DB) Union(keys ...string) ([]core.Value, error) {
 	return d.unionTx(d.store.DB, keys...)
 }
 
-// unionTx computes the union of sets within a transaction.
-// Used internally by UnionStore to ensure atomicity.
 func (d *DB) unionTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
-
-	now := time.Now().UnixMilli()
-	elems := make(map[string]bool)
-
+	elems := make(map[string]struct{})
 	for _, key := range keys {
-		var results []store.RSet
-		err := db.Model(&store.RSet{}).
-			Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
-			Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
-			Scopes(store.NotExpired(now)).
-			Find(&results).Error
+		items, err := d.setElemsByKey(db, key)
 		if err != nil {
 			return nil, err
 		}
-		for _, r := range results {
-			elems[string(r.Elem)] = true
+		for _, item := range items {
+			elems[string(item)] = struct{}{}
+		}
+	}
+	return setValues(elems), nil
+}
+
+// unionTx computes the union of sets within a transaction.
+// Used internally by UnionStore to ensure atomicity.
+func (d *DB) unionTxFast(db *gorm.DB, keys ...string) ([]core.Value, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	sets, err := d.setsByKeys(db, keys...)
+	if err != nil {
+		return nil, err
+	}
+	return unionSetValues(sets), nil
+}
+
+func unionSetValues(sets map[string][]core.Value) []core.Value {
+	elems := make(map[string]struct{})
+	for _, items := range sets {
+		for _, item := range items {
+			elems[string(item)] = struct{}{}
 		}
 	}
 
@@ -961,7 +1198,7 @@ func (d *DB) unionTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
 	for elem := range elems {
 		items = append(items, core.Value(elem))
 	}
-	return items, nil
+	return items
 }
 
 // UnionStore unions multiple sets and stores the result in a destination set.
@@ -971,56 +1208,10 @@ func (d *DB) UnionStore(dest string, keys ...string) (int, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
-
-	var resultCount int
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		// Calculate union within the same transaction for atomicity
-		items, err := d.unionTx(tx, keys...)
-		if err != nil {
-			return err
-		}
-
-		var rkey store.RKey
-		err = tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, dest).
-			First(&rkey).Error
-		if err == nil && rkey.KType != core.TypeSet.Value() {
-			return core.ErrKeyType
-		}
-
-		if err := tx.Where("kdb = ? AND kname = ?", d.dbIdx, dest).
-			Delete(&store.RKey{}).Error; err != nil {
-			return err
-		}
-
-		if len(items) == 0 {
-			return nil
-		}
-
-		rkey = store.RKey{
-			KDB:        d.dbIdx,
-			KName:      dest,
-			KType:      core.TypeSet.Value(),
-			KVer:       1,
-			ModifiedAt: now,
-			KLen:       len(items),
-		}
-		if err := tx.Create(&rkey).Error; err != nil {
-			return err
-		}
-
-		rsets := make([]store.RSet, len(items))
-		for i, item := range items {
-			rsets[i] = store.RSet{KID: rkey.ID, Elem: []byte(item)}
-		}
-		if err := tx.Create(&rsets).Error; err != nil {
-			return err
-		}
-
-		resultCount = len(items)
-		return nil
-	})
-
-	return resultCount, err
+	return d.writeSetStore("union", dest, keys,
+		func(tx *gorm.DB, dialect store.Dialect, keys []string) (int, error) {
+			return d.storeSetResult(tx, dialect, dest, func() ([]core.Value, error) {
+				return d.unionTxFast(tx, keys...)
+			})
+		})
 }

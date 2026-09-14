@@ -5,6 +5,7 @@ package rkey
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -77,61 +78,84 @@ func (d *DB) Count(keys ...string) (int, error) {
 // Delete deletes keys and their values, regardless of the type.
 // Returns the number of deleted keys. Non-existing keys are ignored.
 func (d *DB) Delete(keys ...string) (int, error) {
-	result := d.store.DB.Where("kdb = ? AND kname IN ?", d.dbIdx, keys).
-		Delete(&store.RKey{})
-	if result.Error != nil {
-		return 0, result.Error
+	var count int
+	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		var ids []int
+		err := tx.Model(&store.RKey{}).
+			Where("kdb = ? AND kname IN ?", d.dbIdx, keys).
+			Pluck("id", &ids).Error
+		if err != nil || len(ids) == 0 {
+			return err
+		}
+		if err := deleteKeyValues(tx, ids); err != nil {
+			return err
+		}
+		result := tx.Where("id IN ?", ids).Delete(&store.RKey{})
+		count = int(result.RowsAffected)
+		return result.Error
+	})
+	return count, err
+}
+
+func deleteKeyValues(tx *gorm.DB, ids []int) error {
+	for _, table := range []string{"rstring", "rhash", "rlist", "rset", "rzset"} {
+		if err := tx.Exec("DELETE FROM "+table+" WHERE kid IN ?", ids).Error; err != nil {
+			return err
+		}
 	}
-	return int(result.RowsAffected), nil
+	return nil
+}
+
+func deleteAllKeyValues(tx *gorm.DB) error {
+	for _, table := range []string{"rstring", "rhash", "rlist", "rset", "rzset"} {
+		if err := tx.Exec("DELETE FROM " + table).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteAll deletes all keys and their values, effectively resetting
 // the database. Should not be run inside a database transaction.
 func (d *DB) DeleteAll() error {
-	if d.store.Dialect == store.DialectPostgres {
-		return d.store.DB.Exec("TRUNCATE TABLE rkey CASCADE").Error
-	}
-	return d.store.DB.Where("1 = 1").Delete(&store.RKey{}).Error
+	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		if err := deleteAllKeyValues(tx); err != nil {
+			return err
+		}
+		return tx.Where("1 = 1").Delete(&store.RKey{}).Error
+	})
 }
 
 // DeleteExpired deletes keys with expired TTL, but no more than n keys.
 // If n = 0, deletes all expired keys.
 func (d *DB) DeleteExpired(n int) (count int, err error) {
 	now := time.Now().UnixMilli()
+	var expiredIDs []int
 
 	expiredScope := func(db *gorm.DB) *gorm.DB {
 		return db.Where("kdb = ? AND expire_at IS NOT NULL AND expire_at <= ?", d.dbIdx, now)
 	}
 
+	expiredQuery := d.store.DB.Model(&store.RKey{}).Scopes(expiredScope)
 	if n > 0 {
-		var expiredIDs []int
-		err := d.store.DB.Model(&store.RKey{}).
-			Scopes(expiredScope).
-			Limit(n).
-			Pluck("id", &expiredIDs).Error
-		if err != nil {
-			return 0, err
-		}
-		if len(expiredIDs) == 0 {
-			return 0, nil
-		}
-		// Use transaction to ensure delete operations are isolated
-		err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-			result := tx.Where("id IN ?", expiredIDs).Delete(&store.RKey{})
-			if result.Error != nil {
-				return result.Error
-			}
-			count = int(result.RowsAffected)
-			return nil
-		})
-		return count, err
+		expiredQuery = expiredQuery.Limit(n)
+	}
+	if err := expiredQuery.Pluck("id", &expiredIDs).Error; err != nil {
+		return 0, err
+	}
+	if len(expiredIDs) == 0 {
+		return 0, nil
 	}
 
-	result := d.store.DB.Scopes(expiredScope).Delete(&store.RKey{})
-	if result.Error != nil {
-		return 0, result.Error
-	}
-	return int(result.RowsAffected), nil
+	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+		if err := deleteKeyValues(tx, expiredIDs); err != nil {
+			return err
+		}
+		result := tx.Where("id IN ?", expiredIDs).Delete(&store.RKey{})
+		count = int(result.RowsAffected)
+		return result.Error
+	})
+	return count, err
 }
 
 // Exists reports whether the key exists.
@@ -152,21 +176,8 @@ func (d *DB) Expire(key string, ttl time.Duration) error {
 // the key is expired and no longer exists.
 // If the key does not exist, returns ErrNotFound.
 func (d *DB) ExpireAt(key string, at time.Time) error {
-	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		result := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Updates(map[string]any{
-				"kver":      gorm.Expr("kver + 1"),
-				"expire_at": at.UnixMilli(),
-			})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return core.ErrNotFound
-		}
-		return nil
-	})
+	item := ttlWriteItem{expireAt: at.UnixMilli(), setExpire: true}
+	return d.updateTTL(key, item)
 }
 
 // Get returns a specific key with all associated details.
@@ -239,21 +250,45 @@ func (d *DB) Len() (int, error) {
 // Persist removes the expiration time for the key.
 // If the key does not exist, returns ErrNotFound.
 func (d *DB) Persist(key string) error {
-	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		result := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			Updates(map[string]any{
-				"kver":      gorm.Expr("kver + 1"),
-				"expire_at": nil,
-			})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return core.ErrNotFound
-		}
-		return nil
-	})
+	return d.updateTTL(key, ttlWriteItem{})
+}
+
+type ttlWriteItem struct {
+	expireAt  int64
+	setExpire bool
+}
+
+func (d *DB) ttlScope(key string) string {
+	return "key:ttl:" + strconv.Itoa(d.dbIdx) + "\x00" + key
+}
+
+func (d *DB) updateTTL(key string, item ttlWriteItem) error {
+	return d.store.TransactionWriteItems(context.Background(), d.ttlScope(key), item,
+		func(tx *gorm.DB, _ store.Dialect, items []any) error {
+			last := item
+			if len(items) > 0 {
+				last = items[len(items)-1].(ttlWriteItem)
+			}
+			updates := map[string]any{
+				"kver": gorm.Expr("kver + ?", len(items)),
+			}
+			if last.setExpire {
+				updates["expire_at"] = last.expireAt
+			} else {
+				updates["expire_at"] = nil
+			}
+
+			result := tx.Model(&store.RKey{}).
+				Where("kdb = ? AND kname = ?", d.dbIdx, key).
+				Updates(updates)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				return core.ErrNotFound
+			}
+			return nil
+		})
 }
 
 // Random returns a random key.
@@ -314,6 +349,9 @@ func (d *DB) Rename(key, newKey string) error {
 		}
 
 		if err == nil {
+			if err := deleteKeyValues(tx, []int{newK.ID}); err != nil {
+				return err
+			}
 			if err := tx.Where("id = ?", newK.ID).Delete(&store.RKey{}).Error; err != nil {
 				return err
 			}

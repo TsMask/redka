@@ -3,15 +3,18 @@
 package rhash
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/rand"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
 	"github.com/tsmask/redka/internal/store"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // HashItem represents a field-value pair in a hash.
@@ -204,52 +207,170 @@ func (d *DB) GetMany(key string, fields ...string) (map[string]core.Value, error
 // Incr increments the integer value of a field by delta.
 // Returns the value after the increment.
 func (d *DB) Incr(key, field string, delta int) (int, error) {
-	var newVal int
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeHash.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
+	newVal := 0
+	item := hashIncrWriteItem{delta: delta, value: &newVal}
+	err := d.store.TransactionWriteItems(context.Background(),
+		d.writeScope(key)+"\x00"+field,
+		item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			now := time.Now().UnixMilli()
+			incs := make([]hashIncrWriteItem, 0, len(items))
+			total := 0
+			for _, raw := range items {
+				inc := raw.(hashIncrWriteItem)
+				incs = append(incs, inc)
+				total += inc.delta
 			}
-			if err := tx.Create(&rkey).Error; err != nil {
+			if dialect == store.DialectPostgres {
+				var result struct {
+					KVal []byte `gorm:"column:kval"`
+				}
+				err := tx.Raw(`
+				UPDATE rhash AS h
+				SET kval = CONVERT_TO((CONVERT_FROM(h.kval, 'UTF8')::bigint + ?)::text, 'UTF8')
+				FROM rkey AS k
+				WHERE h.kid = k.id
+				  AND k.kdb = ? AND k.kname = ? AND k.ktype = ? AND h.kfield = ?
+				  AND CONVERT_FROM(h.kval, 'UTF8') ~ '^-?[0-9]+$'
+				RETURNING h.kval`,
+					total, d.dbIdx, key, core.TypeHash.Value(), field).Scan(&result).Error
+				if err == nil && result.KVal != nil {
+					final, convErr := strconv.Atoi(string(result.KVal))
+					if convErr != nil {
+						return core.ErrValueType
+					}
+					d.assignHashIncrResults(incs, final-total)
+					return nil
+				}
+				if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+			}
+			if dialect == store.DialectMySQL {
+				result := tx.Exec(`
+				UPDATE rhash AS h
+				JOIN rkey AS k ON h.kid = k.id
+				SET h.kval = CAST(CAST(h.kval AS SIGNED) + ? AS CHAR)
+				WHERE k.kdb = ? AND k.kname = ? AND k.ktype = ? AND h.kfield = ?
+				  AND h.kval REGEXP '^-?[0-9]+$'`,
+					total, d.dbIdx, key, core.TypeHash.Value(), field)
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected > 0 {
+					var current struct {
+						KVal []byte `gorm:"column:kval"`
+					}
+					err := tx.Model(&store.RKey{}).
+						Select("rhash.kval").
+						Joins("JOIN rhash ON rhash.kid = rkey.id AND rhash.kfield = ?", field).
+						Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
+						First(&current).Error
+					if err != nil {
+						return err
+					}
+					final, convErr := strconv.Atoi(string(current.KVal))
+					if convErr != nil {
+						return core.ErrValueType
+					}
+					d.assignHashIncrResults(incs, final-total)
+					return nil
+				}
+			}
+
+			var current struct {
+				ID    int    `gorm:"column:id"`
+				KType int    `gorm:"column:ktype"`
+				KVal  []byte `gorm:"column:kval"`
+			}
+			currentQuery := tx.Model(&store.RKey{}).
+				Select("rkey.id, rkey.ktype, rhash.kval").
+				Joins("JOIN rhash ON rhash.kid = rkey.id AND rhash.kfield = ?", field).
+				Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key)
+			if dialect == store.DialectMySQL || dialect == store.DialectPostgres {
+				currentQuery = currentQuery.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			if err := currentQuery.First(&current).Error; err == nil {
+				if current.KType != core.TypeHash.Value() {
+					return core.ErrKeyType
+				}
+				valInt, convErr := strconv.Atoi(string(current.KVal))
+				if convErr != nil {
+					return core.ErrValueType
+				}
+				final := d.assignHashIncrResults(incs, valInt)
+				return tx.Model(&store.RHash{}).
+					Where("kid = ? AND kfield = ?", current.ID, field).
+					Update("kval", []byte(strconv.Itoa(final))).Error
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			newVal = delta
-			rhash := store.RHash{
-				KID:    rkey.ID,
-				KField: field,
-				KVal:   []byte(strconv.Itoa(delta)),
-			}
-			return tx.Create(&rhash).Error
 
-		case err != nil:
-			return err
+			var rkey store.RKey
+			err := tx.Model(&store.RKey{}).
+				Where("kdb = ? AND kname = ?", d.dbIdx, key).
+				First(&rkey).Error
 
-		case rkey.KType != core.TypeHash.Value():
-			return core.ErrKeyType
-
-		default:
-			var rhash store.RHash
-			err = tx.Where("kid = ? AND kfield = ?", rkey.ID, field).First(&rhash).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				newVal = delta
+			switch {
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				rkey = store.RKey{
+					KDB:        d.dbIdx,
+					KName:      key,
+					KType:      core.TypeHash.Value(),
+					KVer:       1,
+					ModifiedAt: now,
+					KLen:       1,
+				}
+				if err := tx.Create(&rkey).Error; err != nil {
+					return err
+				}
+				final := d.assignHashIncrResults(incs, 0)
 				rhash := store.RHash{
 					KID:    rkey.ID,
 					KField: field,
-					KVal:   []byte(strconv.Itoa(delta)),
+					KVal:   []byte(strconv.Itoa(final)),
 				}
-				if err := tx.Create(&rhash).Error; err != nil {
+				return tx.Create(&rhash).Error
+
+			case err != nil:
+				return err
+
+			case rkey.KType != core.TypeHash.Value():
+				return core.ErrKeyType
+
+			default:
+				var rhash store.RHash
+				err = tx.Where("kid = ? AND kfield = ?", rkey.ID, field).First(&rhash).Error
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					final := d.assignHashIncrResults(incs, 0)
+					rhash := store.RHash{
+						KID:    rkey.ID,
+						KField: field,
+						KVal:   []byte(strconv.Itoa(final)),
+					}
+					if err := tx.Create(&rhash).Error; err != nil {
+						return err
+					}
+					return tx.Model(&store.RKey{}).
+						Where("id = ?", rkey.ID).
+						Updates(map[string]interface{}{
+							"kver":        gorm.Expr("kver + 1"),
+							"modified_at": now,
+							"klen":        gorm.Expr("klen + 1"),
+						}).Error
+				}
+				if err != nil {
+					return err
+				}
+
+				valInt, err := strconv.Atoi(string(rhash.KVal))
+				if err != nil {
+					return core.ErrValueType
+				}
+				final := d.assignHashIncrResults(incs, valInt)
+
+				rhash.KVal = []byte(strconv.Itoa(final))
+				if err := tx.Save(&rhash).Error; err != nil {
 					return err
 				}
 				return tx.Model(&store.RKey{}).
@@ -257,117 +378,137 @@ func (d *DB) Incr(key, field string, delta int) (int, error) {
 					Updates(map[string]interface{}{
 						"kver":        gorm.Expr("kver + 1"),
 						"modified_at": now,
-						"klen":        gorm.Expr("klen + 1"),
 					}).Error
 			}
-			if err != nil {
-				return err
-			}
-
-			valInt, err := strconv.Atoi(string(rhash.KVal))
-			if err != nil {
-				return core.ErrValueType
-			}
-			newVal = valInt + delta
-
-			rhash.KVal = []byte(strconv.Itoa(newVal))
-			if err := tx.Save(&rhash).Error; err != nil {
-				return err
-			}
-			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"modified_at": now,
-				}).Error
-		}
-	})
+		})
 
 	return newVal, err
 }
 
+func (d *DB) assignHashIncrResults(items []hashIncrWriteItem, start int) int {
+	current := start
+	for _, item := range items {
+		current += item.delta
+		*item.value = current
+	}
+	return current
+}
+
+type hashIncrWriteItem struct {
+	delta int
+	value *int
+}
+
 // IncrFloat increments the float value of a field by delta.
 func (d *DB) IncrFloat(key, field string, delta float64) (float64, error) {
-	var newVal float64
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeHash.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
+	newValue := 0.0
+	item := hashIncrFloatWriteItem{delta: delta, value: &newValue}
+	err := d.store.TransactionWriteItems(context.Background(),
+		d.writeScope(key)+"\x00"+field,
+		item,
+		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
+			now := time.Now().UnixMilli()
+			incs := make([]hashIncrFloatWriteItem, 0, len(items))
+			for _, raw := range items {
+				incs = append(incs, raw.(hashIncrFloatWriteItem))
 			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
+
+			var current struct {
+				ID       int    `gorm:"column:id"`
+				KType    int    `gorm:"column:ktype"`
+				KVal     []byte `gorm:"column:kval"`
+				HasValue bool   `gorm:"column:has_value"`
 			}
-			newVal = delta
-			rhash := store.RHash{
-				KID:    rkey.ID,
-				KField: field,
-				KVal:   []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
+			query := tx.Model(&store.RKey{}).
+				Select("rkey.id, rkey.ktype, rhash.kval, rhash.kid IS NOT NULL AS has_value").
+				Joins("LEFT JOIN rhash ON rhash.kid = rkey.id AND rhash.kfield = ?", field).
+				Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key)
+			// PostgreSQL cannot lock the nullable side of this outer join.
+			if dialect == store.DialectMySQL {
+				query = query.Clauses(clause.Locking{Strength: "UPDATE"})
 			}
-			return tx.Create(&rhash).Error
-
-		case err != nil:
-			return err
-
-		case rkey.KType != core.TypeHash.Value():
-			return core.ErrKeyType
-
-		default:
-			var rhash store.RHash
-			err = tx.Where("kid = ? AND kfield = ?", rkey.ID, field).First(&rhash).Error
+			err := query.First(&current).Error
+			createdKey := false
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				newVal = delta
-				rhash := store.RHash{
-					KID:    rkey.ID,
-					KField: field,
-					KVal:   []byte(strconv.FormatFloat(delta, 'f', -1, 64)),
-				}
-				if err := tx.Create(&rhash).Error; err != nil {
+				rkey, keyCreated, err := store.InsertKeyIfAbsent(tx, dialect, d.dbIdx, key,
+					core.TypeHash.Value(), now, 1)
+				if err != nil {
 					return err
 				}
-				return tx.Model(&store.RKey{}).
-					Where("id = ?", rkey.ID).
-					Updates(map[string]interface{}{
-						"kver":        gorm.Expr("kver + 1"),
-						"modified_at": now,
-						"klen":        gorm.Expr("klen + 1"),
-					}).Error
-			}
-			if err != nil {
+				current.ID = rkey.ID
+				current.KType = rkey.KType
+				createdKey = keyCreated
+			} else if err != nil {
 				return err
 			}
-
-			valFloat, err := strconv.ParseFloat(string(rhash.KVal), 64)
-			if err != nil {
-				return core.ErrValueType
+			if current.KType != core.TypeHash.Value() {
+				return core.ErrKeyType
 			}
-			newVal = valFloat + delta
 
-			rhash.KVal = []byte(strconv.FormatFloat(newVal, 'f', -1, 64))
-			if err := tx.Save(&rhash).Error; err != nil {
-				return err
+			start := 0.0
+			if current.HasValue {
+				start, err = strconv.ParseFloat(string(current.KVal), 64)
+				if err != nil {
+					return core.ErrValueType
+				}
 			}
+			final := d.assignHashIncrFloatResults(incs, start)
+			value := []byte(strconv.FormatFloat(final, 'f', -1, 64))
+
+			if current.HasValue {
+				if dialect == store.DialectMySQL {
+					return tx.Exec(
+						"UPDATE rhash AS h JOIN rkey AS k ON k.id = h.kid "+
+							"SET h.kval = ?, k.kver = k.kver + ?, k.modified_at = ? "+
+							"WHERE h.kid = ? AND h.kfield = ?",
+						value, len(items), now, current.ID, field,
+					).Error
+				}
+				if err := tx.Model(&store.RHash{}).
+					Where("kid = ? AND kfield = ?", current.ID, field).
+					Update("kval", value).Error; err != nil {
+					return err
+				}
+			} else {
+				row := store.RHash{KID: current.ID, KField: field, KVal: value}
+				if err := tx.Create(&row).Error; err != nil {
+					return err
+				}
+				if !createdKey {
+					return tx.Model(&store.RKey{}).
+						Where("id = ?", current.ID).
+						Updates(map[string]interface{}{
+							"kver":        gorm.Expr("kver + 1"),
+							"modified_at": now,
+							"klen":        gorm.Expr("klen + 1"),
+						}).Error
+				}
+				return nil
+			}
+
 			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
+				Where("id = ?", current.ID).
 				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
+					"kver":        gorm.Expr("kver + ?", len(items)),
 					"modified_at": now,
 				}).Error
-		}
-	})
+		})
 
-	return newVal, err
+	return newValue, err
+}
+
+func (d *DB) assignHashIncrFloatResults(items []hashIncrFloatWriteItem, start float64) float64 {
+	current := start
+	for _, item := range items {
+		current += item.delta
+		*item.value = current
+	}
+	return current
+}
+
+type hashIncrFloatWriteItem struct {
+	delta float64
+	value *float64
 }
 
 // Len returns the number of fields in a hash.
@@ -392,8 +533,7 @@ func (d *DB) Random(key string) (HashItem, error) {
 	err := d.store.DB.Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
-		Scopes(store.NotExpired(now)).
-		Order("RANDOM()").
+		Scopes(store.NotExpired(now), store.RandomOrder(d.store.Dialect)).
 		First(&rhash).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -571,86 +711,130 @@ func (d *DB) Set(key, field string, value any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	created := false
+	item := hashWriteItem{field: field, value: vb, created: &created}
+	err = d.store.TransactionWriteItems(context.Background(),
+		d.writeScope(key)+"\x00"+field, item,
+		func(tx *gorm.DB, _ store.Dialect, items []any) error {
+			last := items[len(items)-1].(hashWriteItem)
+			current, getErr := d.getInDB(tx, key, last.field)
+			existed := getErr == nil
+			if getErr != nil && !errors.Is(getErr, core.ErrNotFound) {
+				return getErr
+			}
+			if existed {
+				if bytes.Equal(current, last.value) {
+					return nil
+				}
+				_, updateErr := d.updateExisting(tx, key, last.field, last.value)
+				return updateErr
+			}
 
-	var created bool
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeHash.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
+			rowCreated, setErr := d.setNonBatched(tx, key, last.field, last.value)
+			if setErr != nil {
+				return setErr
 			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
+			if rowCreated && len(items) > 0 {
+				*items[0].(hashWriteItem).created = true
 			}
-			rhash := store.RHash{
-				KID:    rkey.ID,
-				KField: field,
-				KVal:   vb,
-			}
-			if err := tx.Create(&rhash).Error; err != nil {
-				return err
-			}
-			created = true
 			return nil
-
-		case err != nil:
-			return err
-
-		case rkey.KType != core.TypeHash.Value():
-			return core.ErrKeyType
-
-		default:
-			var existing store.RHash
-			err = tx.Where("kid = ? AND kfield = ?", rkey.ID, field).First(&existing).Error
-
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				rhash := store.RHash{
-					KID:    rkey.ID,
-					KField: field,
-					KVal:   vb,
-				}
-				if err := tx.Create(&rhash).Error; err != nil {
-					return err
-				}
-				created = true
-				return tx.Model(&store.RKey{}).
-					Where("id = ?", rkey.ID).
-					Updates(map[string]interface{}{
-						"kver":        gorm.Expr("kver + 1"),
-						"modified_at": now,
-						"klen":        gorm.Expr("klen + 1"),
-					}).Error
-			}
-			if err != nil {
-				return err
-			}
-
-			existing.KVal = vb
-			if err := tx.Save(&existing).Error; err != nil {
-				return err
-			}
-			created = false
-			return tx.Model(&store.RKey{}).
-				Where("id = ?", rkey.ID).
-				Updates(map[string]interface{}{
-					"kver":        gorm.Expr("kver + 1"),
-					"modified_at": now,
-				}).Error
-		}
-	})
-
+		})
 	return created, err
+}
+
+type hashWriteItem struct {
+	field   string
+	value   []byte
+	created *bool
+}
+
+func (d *DB) getInDB(db *gorm.DB, key, field string) ([]byte, error) {
+	var result struct {
+		Value []byte
+	}
+	err := db.Model(&store.RHash{}).
+		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
+		Where("rkey.kdb = ? AND rkey.kname = ? AND rhash.kfield = ?", d.dbIdx, key, field).
+		Scopes(store.NotExpired(time.Now().UnixMilli())).
+		Select("rhash.kval as value").
+		First(&result).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, core.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result.Value, nil
+}
+
+func (d *DB) setNonBatched(db *gorm.DB, key, field string, vb []byte) (bool, error) {
+	var created bool
+	err := db.Transaction(func(tx *gorm.DB) error {
+		dialect := d.store.Dialect
+		now := time.Now().UnixMilli()
+		rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key,
+			core.TypeHash.Value(), now, 0)
+		if err != nil {
+			return err
+		}
+		if rkey.KType != core.TypeHash.Value() {
+			return core.ErrKeyType
+		}
+
+		row := store.RHash{KID: rkey.ID, KField: field, KVal: vb}
+		result := store.CreateIgnoreConflict(tx, dialect,
+			[]clause.Column{{Name: "kid"}, {Name: "kfield"}}, &row)
+		if result.Error != nil {
+			return result.Error
+		}
+		created = result.RowsAffected == 1
+		if created {
+			return nil
+		}
+		return tx.Model(&store.RHash{}).
+			Where("kid = ? AND kfield = ?", rkey.ID, field).
+			Update("kval", vb).Error
+	})
+	return created, err
+}
+
+func (d *DB) writeScope(key string) string {
+	return "hash:write:" + strconv.Itoa(d.dbIdx) + "\x00" + key
+}
+
+// updateExisting performs a one-statement update of an existing hot field.
+func (d *DB) updateExisting(db *gorm.DB, key, field string, value []byte) (bool, error) {
+	if d.store.Dialect == store.DialectMySQL {
+		result := db.Exec(`
+			UPDATE rkey AS k
+			JOIN rhash AS h ON h.kid = k.id
+			SET h.kval = ?
+			WHERE k.kdb = ? AND k.kname = ? AND k.ktype = ? AND h.kfield = ?`,
+			value, d.dbIdx, key, core.TypeHash.Value(), field)
+		if result.Error != nil {
+			return false, result.Error
+		}
+		return result.RowsAffected > 0, nil
+	}
+
+	var result *gorm.DB
+	switch d.store.Dialect {
+	case store.DialectSQLite, store.DialectPostgres:
+		result = db.Exec(`
+			UPDATE rhash
+			SET kval = ?
+			WHERE kid = (
+				SELECT id FROM rkey
+				WHERE kdb = ? AND kname = ? AND ktype = ?
+			) AND kfield = ?`,
+			value, d.dbIdx, key, core.TypeHash.Value(), field)
+	default:
+		return false, nil
+	}
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
 
 // SetMany sets multiple field-value pairs in a hash.
@@ -669,94 +853,57 @@ func (d *DB) SetMany(key string, items map[string]any) (int, error) {
 		values[k] = vb
 	}
 
-	var newCount int
-
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
-		now := time.Now().UnixMilli()
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeHash.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       0,
+	if len(values) == 1 {
+		for field, val := range values {
+			created, err := d.Set(key, field, val)
+			if err != nil {
+				return 0, err
 			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
+			if created {
+				return 1, nil
 			}
-
-		case err != nil:
-			return err
-
-		case rkey.KType != core.TypeHash.Value():
-			return core.ErrKeyType
+			return 0, nil
 		}
+	}
 
-		// 批量查询所有现有字段，避免 N+1 查询
-		var existingFields []store.RHash
-		err = tx.Where("kid = ?", rkey.ID).Find(&existingFields).Error
+	var newCount int
+	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+		now := time.Now().UnixMilli()
+		rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key, core.TypeHash.Value(), now, 0)
 		if err != nil {
 			return err
 		}
-
-		// 构建已存在字段的 map
-		existingMap := make(map[string]*store.RHash, len(existingFields))
-		for i := range existingFields {
-			existingMap[existingFields[i].KField] = &existingFields[i]
+		if rkey.KType != core.TypeHash.Value() {
+			return core.ErrKeyType
 		}
 
-		// 分离新增和更新的字段
-		var newFields []store.RHash
-		var updateFields []store.RHash
-		newCount = 0
-
+		rows := make([]store.RHash, 0, len(values))
+		fields := make([]string, 0, len(values))
+		caseArgs := make([]interface{}, 0, len(values)*2)
 		for field, val := range values {
-			if existing, ok := existingMap[field]; ok {
-				// 字段已存在，准备更新
-				existing.KVal = val
-				updateFields = append(updateFields, *existing)
-			} else {
-				// 字段不存在，准备插入
-				newFields = append(newFields, store.RHash{
-					KID:    rkey.ID,
-					KField: field,
-					KVal:   val,
-				})
-				newCount++
-			}
+			rows = append(rows, store.RHash{KID: rkey.ID, KField: field, KVal: val})
+			fields = append(fields, field)
+			caseArgs = append(caseArgs, field, val)
 		}
 
-		// 批量插入新字段
-		if len(newFields) > 0 {
-			if err := tx.Create(&newFields).Error; err != nil {
-				return err
-			}
+		result := store.CreateIgnoreConflict(tx, dialect,
+			[]clause.Column{{Name: "kid"}, {Name: "kfield"}}, &rows)
+		if result.Error != nil {
+			return result.Error
+		}
+		newCount = int(result.RowsAffected)
+		if newCount == len(values) {
+			return nil
 		}
 
-		// 批量更新现有字段
-		if len(updateFields) > 0 {
-			for i := range updateFields {
-				if err := tx.Save(&updateFields[i]).Error; err != nil {
-					return err
-				}
-			}
-		}
-
-		// 更新键的长度
-		return tx.Model(&store.RKey{}).
-			Where("id = ?", rkey.ID).
-			Updates(map[string]interface{}{
-				"kver":        gorm.Expr("kver + 1"),
-				"modified_at": now,
-				"klen":        gorm.Expr("klen + ?", newCount),
-			}).Error
+		// Existing fields need their values set; newly inserted fields already
+		// have the requested value and are unchanged by the matching branch.
+		return tx.Model(&store.RHash{}).
+			Where("kid = ? AND kfield IN ?", rkey.ID, fields).
+			Update("kval", gorm.Expr(
+				"CASE kfield "+strings.Repeat("WHEN ? THEN ? ", len(values))+"ELSE kval END",
+				caseArgs...,
+			)).Error
 	})
 
 	return newCount, err
@@ -832,8 +979,7 @@ func (d *DB) RandField(key string, count int, withValues bool) ([]HashItem, erro
 	query := d.store.DB.Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
-		Scopes(store.NotExpired(now)).
-		Order("RANDOM()")
+		Scopes(store.NotExpired(now), store.RandomOrder(d.store.Dialect))
 
 	if count >= 0 {
 		query = query.Limit(count)
@@ -869,71 +1015,24 @@ func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
 	}
 
 	var created bool
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err = d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
-		var rkey store.RKey
-		err := tx.Model(&store.RKey{}).
-			Where("kdb = ? AND kname = ?", d.dbIdx, key).
-			First(&rkey).Error
-
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			rkey = store.RKey{
-				KDB:        d.dbIdx,
-				KName:      key,
-				KType:      core.TypeHash.Value(),
-				KVer:       1,
-				ModifiedAt: now,
-				KLen:       1,
-			}
-			if err := tx.Create(&rkey).Error; err != nil {
-				return err
-			}
-			rhash := store.RHash{
-				KID:    rkey.ID,
-				KField: field,
-				KVal:   vb,
-			}
-			if err := tx.Create(&rhash).Error; err != nil {
-				return err
-			}
-			created = true
-			return nil
-
-		case err != nil:
+		rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key, core.TypeHash.Value(), now, 0)
+		if err != nil {
 			return err
-
-		case rkey.KType != core.TypeHash.Value():
-			return core.ErrKeyType
-
-		default:
-			var existing store.RHash
-			err = tx.Where("kid = ? AND kfield = ?", rkey.ID, field).First(&existing).Error
-
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				rhash := store.RHash{
-					KID:    rkey.ID,
-					KField: field,
-					KVal:   vb,
-				}
-				if err := tx.Create(&rhash).Error; err != nil {
-					return err
-				}
-				created = true
-				return tx.Model(&store.RKey{}).
-					Where("id = ?", rkey.ID).
-					Updates(map[string]interface{}{
-						"kver":        gorm.Expr("kver + 1"),
-						"modified_at": now,
-						"klen":        gorm.Expr("klen + 1"),
-					}).Error
-			}
-			if err != nil {
-				return err
-			}
-			created = false
-			return nil
 		}
+		if rkey.KType != core.TypeHash.Value() {
+			return core.ErrKeyType
+		}
+
+		row := store.RHash{KID: rkey.ID, KField: field, KVal: vb}
+		result := store.CreateIgnoreConflict(tx, dialect,
+			[]clause.Column{{Name: "kid"}, {Name: "kfield"}}, &row)
+		if result.Error != nil {
+			return result.Error
+		}
+		created = result.RowsAffected == 1
+		return nil
 	})
 
 	return created, err

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -16,8 +17,10 @@ type Store struct {
 	Dialect Dialect  // database dialect
 	DB      *gorm.DB // primary database handle
 
-	cleanupTicker *time.Ticker  // timer for periodic cleanup
-	cleanupStop   chan struct{} // channel to stop cleanup goroutine
+	writeCommitter *writeCommitter
+	inTx           bool          // true when DB is already a transaction
+	cleanupTicker  *time.Ticker  // timer for periodic cleanup
+	cleanupStop    chan struct{} // channel to stop cleanup goroutine
 }
 
 // Open creates a new database handle from a DSN.
@@ -42,17 +45,44 @@ func Open(dsn string) (*Store, error) {
 	if err := store.Migrate(); err != nil {
 		return nil, err
 	}
+	store.writeCommitter = newWriteCommitter(store)
 	return store, nil
 }
 
 func (s *Store) Transaction(ctx context.Context, fn func(gormTx *gorm.DB, dialect Dialect) error) error {
+	if s.inTx {
+		return fn(s.DB.WithContext(ctx), s.Dialect)
+	}
 	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return fn(tx, s.Dialect)
 	})
 }
 
+// WithContext returns a request-scoped copy while preserving shared services
+// such as the write committer.
+func (s *Store) WithContext(ctx context.Context) *Store {
+	requestStore := *s
+	requestStore.DB = s.DB.WithContext(ctx)
+	return &requestStore
+}
+
+// InTx reports whether this handle is bound to an existing transaction.
+func (s *Store) InTx() bool {
+	return s.inTx
+}
+
+// FromTx wraps an existing database transaction. Repository calls to
+// Transaction then reuse the transaction instead of creating a savepoint.
+func FromTx(dialect Dialect, db *gorm.DB) *Store {
+	return &Store{Dialect: dialect, DB: db, inTx: true}
+}
+
 // Close closes the underlying sql.DB connection and stops the cleanup service.
 func (s *Store) Close() error {
+	if s.writeCommitter != nil {
+		s.writeCommitter.close()
+	}
+
 	// Stop the cleanup service
 	if s.cleanupStop != nil {
 		close(s.cleanupStop)
@@ -112,29 +142,34 @@ func (s *Store) Migrate() error {
 // in high-concurrency scenarios.
 func (s *Store) CleanupExpiredKeys() (int, error) {
 	now := s.DB.NowFunc().UnixMilli()
+	var deleted int
 
-	var expiredIDs []int
-	err := s.DB.Model(&RKey{}).
-		Where("expire_at IS NOT NULL AND expire_at <= ?", now).
-		Pluck("id", &expiredIDs).Error
-	if err != nil {
-		return 0, err
-	}
+	err := s.Transaction(context.Background(), func(tx *gorm.DB, _ Dialect) error {
+		query := tx.Model(&RKey{}).
+			Where("expire_at IS NOT NULL AND expire_at <= ?", now)
+		if s.Dialect == DialectMySQL || s.Dialect == DialectPostgres {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
 
-	if len(expiredIDs) == 0 {
-		return 0, nil
-	}
+		var expiredIDs []int
+		if err := query.Pluck("id", &expiredIDs).Error; err != nil {
+			return err
+		}
+		if len(expiredIDs) == 0 {
+			return nil
+		}
 
-	// Use separate DELETE statements without transaction to avoid deadlocks
-	// Each DELETE is independent and auto-committed
-	s.DB.Exec("DELETE FROM rstring WHERE kid IN ?", expiredIDs)
-	s.DB.Exec("DELETE FROM rhash WHERE kid IN ?", expiredIDs)
-	s.DB.Exec("DELETE FROM rlist WHERE kid IN ?", expiredIDs)
-	s.DB.Exec("DELETE FROM rset WHERE kid IN ?", expiredIDs)
-	s.DB.Exec("DELETE FROM rzset WHERE kid IN ?", expiredIDs)
-	result := s.DB.Exec("DELETE FROM rkey WHERE id IN ?", expiredIDs)
+		for _, table := range []string{"rstring", "rhash", "rlist", "rset", "rzset"} {
+			if err := tx.Exec("DELETE FROM "+table+" WHERE kid IN ?", expiredIDs).Error; err != nil {
+				return err
+			}
+		}
+		result := tx.Where("id IN ?", expiredIDs).Delete(&RKey{})
+		deleted = int(result.RowsAffected)
+		return result.Error
+	})
 
-	return int(result.RowsAffected), result.Error
+	return deleted, err
 }
 
 // StartCleanupTicker starts a background goroutine that periodically cleans up
@@ -166,9 +201,18 @@ func (s *Store) StartCleanupTicker(interval time.Duration) {
 
 // gormConfig returns the GORM configuration.
 func gormConfig() *gorm.Config {
+	return gormConfigWithPreparedStatements(true)
+}
+
+func gormConfigWithPreparedStatements(preparedStmt bool) *gorm.Config {
 	return &gorm.Config{
-		PrepareStmt: true,
-		Logger:      logger.Default.LogMode(logger.Silent),
+		// Repository code already opens transactions for multi-statement
+		// invariants. Skipping GORM's implicit transaction avoids a second
+		// commit on one-statement writes.
+		SkipDefaultTransaction:   true,
+		DisableNestedTransaction: true,
+		PrepareStmt:              preparedStmt,
+		Logger:                   logger.Default.LogMode(logger.Silent),
 	}
 }
 

@@ -56,6 +56,12 @@ func NewConnWriter(conn redcon.Conn) *ConnWriter {
 			cw.ctx.Store(k, v)
 		}
 	}
+	if m, ok := existing.(*sync.Map); ok {
+		m.Range(func(k, v any) bool {
+			cw.ctx.Store(k, v)
+			return true
+		})
+	}
 	conn.SetContext(&cw.ctx)
 	return cw
 }
