@@ -34,6 +34,7 @@ type ScanResult struct {
 type DB struct {
 	store *store.Store
 	dbIdx int
+	ctx   context.Context
 }
 
 // Scanner is the iterator for keys.
@@ -52,8 +53,20 @@ type Scanner struct {
 
 // New creates a new database-backed key repository.
 // Does not create the database schema.
-func New(s *store.Store) *DB {
-	return &DB{store: s, dbIdx: 0}
+func New(ctx context.Context, s *store.Store) *DB {
+	return &DB{store: s, dbIdx: 0, ctx: ctx}
+}
+
+// WithContext returns a copy of DB bound to ctx.
+func (d *DB) WithContext(ctx context.Context) *DB {
+	newDB := *d
+	newDB.ctx = ctx
+	return &newDB
+}
+
+// db returns the store view bound to this DB's context.
+func (d *DB) db() *gorm.DB {
+	return d.store.WithContext(d.ctx).DB
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -68,7 +81,7 @@ func (d *DB) WithDB(dbIdx int) *DB {
 func (d *DB) Count(keys ...string) (int, error) {
 	now := time.Now().UnixMilli()
 	var count int64
-	err := d.store.DB.Model(&store.RKey{}).
+	err := d.db().Model(&store.RKey{}).
 		Where("kdb = ? AND kname IN ?", d.dbIdx, keys).
 		Scopes(store.NotExpired(now)).
 		Count(&count).Error
@@ -79,7 +92,7 @@ func (d *DB) Count(keys ...string) (int, error) {
 // Returns the number of deleted keys. Non-existing keys are ignored.
 func (d *DB) Delete(keys ...string) (int, error) {
 	var count int
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := d.store.Transaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		var ids []int
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname IN ?", d.dbIdx, keys).
@@ -129,7 +142,7 @@ func deleteDBKeyValues(tx *gorm.DB, dbIdx int) error {
 // DeleteAll deletes all keys and their values, effectively resetting
 // the database. Should not be run inside a database transaction.
 func (d *DB) DeleteAll() error {
-	return d.store.ExclusiveTransaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	return d.store.ExclusiveTransaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		if err := deleteAllKeyValues(tx); err != nil {
 			return err
 		}
@@ -140,7 +153,7 @@ func (d *DB) DeleteAll() error {
 // DeleteAllInDB deletes all keys and values in the repository's logical
 // database. It is the storage implementation of FLUSHDB.
 func (d *DB) DeleteAllInDB() error {
-	return d.store.ExclusiveTransaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	return d.store.ExclusiveTransaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		if err := deleteDBKeyValues(tx, d.dbIdx); err != nil {
 			return err
 		}
@@ -158,7 +171,7 @@ func (d *DB) DeleteExpired(n int) (count int, err error) {
 		return db.Where("kdb = ? AND expire_at IS NOT NULL AND expire_at <= ?", d.dbIdx, now)
 	}
 
-	expiredQuery := d.store.DB.Model(&store.RKey{}).Scopes(expiredScope)
+	expiredQuery := d.db().Model(&store.RKey{}).Scopes(expiredScope)
 	if n > 0 {
 		expiredQuery = expiredQuery.Limit(n)
 	}
@@ -169,7 +182,7 @@ func (d *DB) DeleteExpired(n int) (count int, err error) {
 		return 0, nil
 	}
 
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err = d.store.Transaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		if err := deleteKeyValues(tx, expiredIDs); err != nil {
 			return err
 		}
@@ -207,7 +220,7 @@ func (d *DB) ExpireAt(key string, at time.Time) error {
 func (d *DB) Get(key string) (core.Key, error) {
 	now := time.Now().UnixMilli()
 	var rkey store.RKey
-	err := d.store.DB.Where("kdb = ? AND kname = ?", d.dbIdx, key).
+	err := d.db().Where("kdb = ? AND kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		First(&rkey).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -238,7 +251,7 @@ func (d *DB) Keys(pattern string) ([]core.Key, error) {
 	now := time.Now().UnixMilli()
 
 	var rkeys []store.RKey
-	err := d.store.DB.Where("kdb = ?", d.dbIdx).
+	err := d.db().Where("kdb = ?", d.dbIdx).
 		Scopes(store.NotExpired(now), store.GlobPattern(d.store.Dialect, pattern)).
 		Find(&rkeys).Error
 	if err != nil {
@@ -263,7 +276,7 @@ func (d *DB) Keys(pattern string) ([]core.Key, error) {
 // Len returns the total number of keys, including expired ones.
 func (d *DB) Len() (int, error) {
 	var count int64
-	err := d.store.DB.Model(&store.RKey{}).
+	err := d.db().Model(&store.RKey{}).
 		Where("kdb = ?", d.dbIdx).
 		Count(&count).Error
 	return int(count), err
@@ -285,7 +298,7 @@ func (d *DB) ttlScope(key string) string {
 }
 
 func (d *DB) updateTTL(key string, item ttlWriteItem) error {
-	return d.store.TransactionWriteItems(context.Background(), d.ttlScope(key), item,
+	return d.store.TransactionWriteItems(d.ctx, d.ttlScope(key), item,
 		func(tx *gorm.DB, _ store.Dialect, items []any) error {
 			last := item
 			if len(items) > 0 {
@@ -320,7 +333,7 @@ func (d *DB) updateTTL(key string, item ttlWriteItem) error {
 func (d *DB) Random() (core.Key, error) {
 	now := time.Now().UnixMilli()
 	var rkey store.RKey
-	err := d.store.DB.Where("kdb = ?", d.dbIdx).
+	err := d.db().Where("kdb = ?", d.dbIdx).
 		Scopes(store.NotExpired(now), store.RandomOrder(d.store.Dialect)).
 		First(&rkey).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -348,7 +361,7 @@ func (d *DB) Rename(key, newKey string) error {
 		return nil
 	}
 
-	return d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	return d.store.Transaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		now := time.Now().UnixMilli()
 		var oldK store.RKey
 		err := tx.Model(&store.RKey{}).
@@ -400,7 +413,7 @@ func (d *DB) RenameNotExists(key, newKey string) (bool, error) {
 	}
 
 	var renamed bool
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := d.store.Transaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		now := time.Now().UnixMilli()
 		var oldK store.RKey
 		err := tx.Model(&store.RKey{}).
@@ -455,7 +468,7 @@ func (d *DB) Scan(cursor int, pattern string, ktype core.TypeID, count int) (Sca
 	}
 	now := time.Now().UnixMilli()
 	var rkeys []store.RKey
-	db := d.store.DB.Where("kdb = ? AND id > ?", d.dbIdx, cursor).
+	db := d.db().Where("kdb = ? AND id > ?", d.dbIdx, cursor).
 		Scopes(store.NotExpired(now), store.GlobPattern(d.store.Dialect, pattern)).
 		Order("id ASC").
 		Limit(count)

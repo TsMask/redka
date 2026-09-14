@@ -27,12 +27,13 @@ import (
 type DB struct {
 	store *store.Store
 	dbIdx int
+	ctx   context.Context
 }
 
 // New connects to the string repository.
 // Does not create the database schema.
-func New(s *store.Store) *DB {
-	return &DB{store: s, dbIdx: 0}
+func New(ctx context.Context, s *store.Store) *DB {
+	return &DB{store: s, dbIdx: 0, ctx: ctx}
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -41,6 +42,20 @@ func (d *DB) WithDB(dbIdx int) *DB {
 	newDB := *d
 	newDB.dbIdx = dbIdx
 	return &newDB
+}
+
+// GetDBIdx returns the logical database index this repository is bound to.
+func (d *DB) GetDBIdx() int { return d.dbIdx }
+// WithContext returns a copy of DB bound to ctx. The original DB is not modified.
+func (d *DB) WithContext(ctx context.Context) *DB {
+	newDB := *d
+	newDB.ctx = ctx
+	return &newDB
+}
+
+// db returns the store view bound to this DB's context.
+func (d *DB) db() *gorm.DB {
+	return d.store.WithContext(d.ctx).DB
 }
 
 // Get returns the value of the key.
@@ -53,7 +68,7 @@ func (d *DB) Get(key string) (core.Value, error) {
 		ExpireAt *int64 `gorm:"column:expire_at"`
 		KVal     []byte `gorm:"column:kval"`
 	}
-	err := d.store.DB.Model(&store.RKey{}).
+	err := d.db().Model(&store.RKey{}).
 		Select("rkey.ktype, rkey.expire_at, rstring.kval").
 		Joins("LEFT JOIN rstring ON rstring.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
@@ -90,7 +105,7 @@ func (d *DB) GetMany(keys ...string) (map[string]core.Value, error) {
 		KeyName string
 		Value   []byte
 	}
-	err := d.store.DB.Model(&store.RString{}).
+	err := d.db().Model(&store.RString{}).
 		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = ?", core.TypeString.Value()).
 		Where("rkey.kdb = ? AND rkey.kname IN ?", d.dbIdx, keys).
 		Scopes(store.NotExpired(now)).
@@ -119,7 +134,7 @@ func (d *DB) Incr(key string, delta int) (int, error) {
 	value := 0
 	item := incrWriteItem{delta: delta, value: &value}
 
-	err := d.store.TransactionWriteItems(context.Background(),
+	err := d.store.TransactionWriteItems(d.ctx,
 		"string:incr:"+strconv.Itoa(d.dbIdx)+"\x00"+key, item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			run := func(tx *gorm.DB) error {
@@ -234,7 +249,7 @@ type incrWriteItem struct {
 func (d *DB) IncrFloat(key string, delta float64) (float64, error) {
 	newValue := 0.0
 	item := incrFloatWriteItem{delta: delta, value: &newValue}
-	err := d.store.TransactionWriteItems(context.Background(),
+	err := d.store.TransactionWriteItems(d.ctx,
 		d.writeScope(key), item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			now := time.Now().UnixMilli()
@@ -338,7 +353,7 @@ func (d *DB) Set(key string, value any) error {
 	}
 
 	item := setWriteItem{value: vb}
-	return d.store.TransactionWriteItems(context.Background(),
+	return d.store.TransactionWriteItems(d.ctx,
 		d.writeScope(key), item,
 		func(tx *gorm.DB, _ store.Dialect, items []any) error {
 			last := items[len(items)-1].(setWriteItem)
@@ -364,7 +379,7 @@ func (d *DB) SetExpire(key string, value any, ttl time.Duration) error {
 	}
 	expireAt := time.Now().UnixMilli() + ttl.Milliseconds()
 	item := setWriteItem{value: vb, expireAt: &expireAt}
-	return d.store.TransactionWriteItems(context.Background(),
+	return d.store.TransactionWriteItems(d.ctx,
 		d.writeScope(key), item,
 		func(tx *gorm.DB, _ store.Dialect, items []any) error {
 			last := items[len(items)-1].(setWriteItem)
@@ -603,7 +618,7 @@ func (d *DB) SetMany(items map[string]any) error {
 		scope += strconv.Itoa(len(name)) + ":" + name + "\x1f"
 	}
 
-	return d.store.TransactionWriteItems(context.Background(), scope, item,
+	return d.store.TransactionWriteItems(d.ctx, scope, item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			final := make(map[string][]byte, len(values))
 			for _, raw := range items {
@@ -917,7 +932,7 @@ func (d *DB) SetNX(key string, value any) (bool, error) {
 // This implements SET key value NX EX seconds / PX milliseconds.
 func (d *DB) SetNXWithTTL(key string, value any, ttl time.Duration) (bool, error) {
 	var created bool
-	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err := d.store.TransactionRetry(d.ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var expireAt *int64
@@ -971,7 +986,7 @@ func (d *DB) SetXX(key string, value any) (bool, error) {
 // This implements SET key value XX EX seconds / PX milliseconds.
 func (d *DB) SetXXWithTTL(key string, value any, ttl time.Duration) (bool, error) {
 	var updated bool
-	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err := d.store.TransactionRetry(d.ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var expireAt *int64
@@ -1033,7 +1048,7 @@ func (d *DB) SetXXWithTTL(key string, value any, ttl time.Duration) (bool, error
 func (d *DB) SetNXGet(key string, value any, ttl time.Duration) (core.Value, bool, error) {
 	var prev core.Value
 	var created bool
-	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err := d.store.TransactionRetry(d.ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var expireAt *int64
@@ -1109,7 +1124,7 @@ func (d *DB) SetNXGet(key string, value any, ttl time.Duration) (core.Value, boo
 func (d *DB) SetXXGet(key string, value any, ttl time.Duration) (core.Value, bool, error) {
 	var prev core.Value
 	var updated bool
-	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err := d.store.TransactionRetry(d.ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var expireAt *int64
@@ -1180,7 +1195,7 @@ func (d *DB) SetGet(key string, value any) (core.Value, error) {
 
 	prev := core.Value(nil)
 	item := setGetWriteItem{value: vb, prev: &prev}
-	err = d.store.TransactionWriteItems(context.Background(), d.writeScope(key), item,
+	err = d.store.TransactionWriteItems(d.ctx, d.writeScope(key), item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			run := func(tx *gorm.DB) error {
 				now := time.Now().UnixMilli()
@@ -1296,7 +1311,7 @@ type setGetWriteItem struct {
 // Time complexity: O(1)
 func (d *DB) SetKeepTTL(key string, value any) (bool, error) {
 	var updated bool
-	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err := d.store.TransactionRetry(d.ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		vb, err := core.ToBytes(value)
@@ -1373,7 +1388,7 @@ func (d *DB) StrLen(key string) (int, error) {
 	var result struct {
 		Len int
 	}
-	err := d.store.DB.Model(&store.RString{}).
+	err := d.db().Model(&store.RString{}).
 		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = ?", core.TypeString.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -1394,7 +1409,7 @@ func (d *DB) StrLen(key string) (int, error) {
 func (d *DB) Append(key string, value []byte) (int, error) {
 	newLen := 0
 	item := appendWriteItem{value: value, length: &newLen}
-	err := d.store.TransactionWriteItems(context.Background(), d.writeScope(key), item,
+	err := d.store.TransactionWriteItems(d.ctx, d.writeScope(key), item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			run := func(tx *gorm.DB) error {
 				now := time.Now().UnixMilli()
@@ -1557,7 +1572,7 @@ func (d *DB) SetRange(key string, offset int, value []byte) (int, error) {
 
 	newLen := 0
 	item := setRangeWriteItem{offset: offset, value: value, length: &newLen}
-	err := d.store.TransactionWriteItems(context.Background(), d.writeScope(key), item,
+	err := d.store.TransactionWriteItems(d.ctx, d.writeScope(key), item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			run := func(tx *gorm.DB) error {
 				now := time.Now().UnixMilli()
@@ -1652,7 +1667,7 @@ func (d *DB) GetRange(key string, start, end int) (core.Value, error) {
 	var result struct {
 		Value []byte
 	}
-	err := d.store.DB.Model(&store.RString{}).
+	err := d.db().Model(&store.RString{}).
 		Joins("JOIN rkey ON rstring.kid = rkey.id AND rkey.ktype = ?", core.TypeString.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).

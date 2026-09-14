@@ -257,7 +257,7 @@ func handleMulti(ctx context.Context, w redis.Writer, state *connState, db *stor
 		for i, pcmd := range state.cmds {
 			// A savepoint keeps a failing command atomic even when its repository
 			// has already written part of the operation before returning an error.
-			err := runMultiCommand(tx, dialect, dbIdx, i, pcmd, responses)
+			err := runMultiCommand(ctx, tx, dialect, dbIdx, i, pcmd, responses)
 			if err != nil {
 				if !isMultiRuntimeError(err) {
 					return err
@@ -277,7 +277,7 @@ func handleMulti(ctx context.Context, w redis.Writer, state *connState, db *stor
 }
 
 func runMultiCommand(
-	tx *gorm.DB, dialect store.Dialect, dbIdx, index int, pcmd redis.Cmd, w redis.Writer,
+	ctx context.Context, tx *gorm.DB, dialect store.Dialect, dbIdx, index int, pcmd redis.Cmd, w redis.Writer,
 ) error {
 	needsSavepoint := multiNeedsSavepoint(pcmd.Name())
 	var name string
@@ -289,7 +289,7 @@ func runMultiCommand(
 	}
 
 	s := store.FromTx(dialect, tx)
-	_, runErr := pcmd.Run(w, redis.NewRedka(s, dbIdx))
+	_, runErr := pcmd.Run(w, redis.NewRedka(ctx, s, dbIdx))
 	if runErr != nil && needsSavepoint {
 		if err := tx.Exec("ROLLBACK TO SAVEPOINT " + name).Error; err != nil {
 			slog.Warn("rollback multi command",
@@ -460,7 +460,7 @@ func handleSingle(ctx context.Context, w redis.Writer, state *connState, db *sto
 	dbIdx := redis.GetSelectedDB(w)
 
 	s := db.WithContext(ctx)
-	_, err := pcmd.Run(w, redis.NewRedka(s, dbIdx))
+	_, err := pcmd.Run(w, redis.NewRedka(ctx, s, dbIdx))
 	if err != nil {
 		slog.Warn("run single command", "name", pcmd.Name(), "err", err)
 	}

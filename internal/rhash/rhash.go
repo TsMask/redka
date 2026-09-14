@@ -44,6 +44,7 @@ const scanPageSize = 10
 type DB struct {
 	store *store.Store
 	dbIdx int
+	ctx   context.Context
 }
 
 // Scanner is the iterator for hash items.
@@ -62,8 +63,20 @@ type Scanner struct {
 
 // New connects to the hash repository.
 // Does not create the database schema.
-func New(s *store.Store) *DB {
-	return &DB{store: s, dbIdx: 0}
+func New(ctx context.Context, s *store.Store) *DB {
+	return &DB{store: s, dbIdx: 0, ctx: ctx}
+}
+
+// WithContext returns a copy of DB bound to ctx.
+func (d *DB) WithContext(ctx context.Context) *DB {
+	newDB := *d
+	newDB.ctx = ctx
+	return &newDB
+}
+
+// db returns the store view bound to this DB's context.
+func (d *DB) db() *gorm.DB {
+	return d.store.WithContext(d.ctx).DB
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -85,7 +98,7 @@ func (d *DB) Delete(key string, fields ...string) (int, error) {
 	}
 
 	var n int64
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := d.store.Transaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var rkey store.RKey
@@ -129,7 +142,7 @@ func (d *DB) Exists(key, field string) (bool, error) {
 	var result struct {
 		Count int64
 	}
-	err := d.store.DB.Model(&store.RHash{}).
+	err := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rhash.kfield = ?", d.dbIdx, key, field).
 		Scopes(store.NotExpired(now)).
@@ -142,7 +155,7 @@ func (d *DB) Exists(key, field string) (bool, error) {
 func (d *DB) Fields(key string) ([]string, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RHash
-	err := d.store.DB.Model(&store.RHash{}).
+	err := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -164,7 +177,7 @@ func (d *DB) Get(key, field string) (core.Value, error) {
 	var result struct {
 		Value []byte
 	}
-	err := d.store.DB.Model(&store.RHash{}).
+	err := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rhash.kfield = ?", d.dbIdx, key, field).
 		Scopes(store.NotExpired(now)).
@@ -188,7 +201,7 @@ func (d *DB) GetMany(key string, fields ...string) (map[string]core.Value, error
 
 	now := time.Now().UnixMilli()
 	var results []store.RHash
-	err := d.store.DB.Model(&store.RHash{}).
+	err := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rhash.kfield IN ?", d.dbIdx, key, fields).
 		Scopes(store.NotExpired(now)).
@@ -209,7 +222,7 @@ func (d *DB) GetMany(key string, fields ...string) (map[string]core.Value, error
 func (d *DB) Incr(key, field string, delta int) (int, error) {
 	newVal := 0
 	item := hashIncrWriteItem{delta: delta, value: &newVal}
-	err := d.store.TransactionWriteItems(context.Background(),
+	err := d.store.TransactionWriteItems(d.ctx,
 		d.writeScope(key)+"\x00"+field,
 		item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
@@ -403,7 +416,7 @@ type hashIncrWriteItem struct {
 func (d *DB) IncrFloat(key, field string, delta float64) (float64, error) {
 	newValue := 0.0
 	item := hashIncrFloatWriteItem{delta: delta, value: &newValue}
-	err := d.store.TransactionWriteItems(context.Background(),
+	err := d.store.TransactionWriteItems(d.ctx,
 		d.writeScope(key)+"\x00"+field,
 		item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
@@ -517,7 +530,7 @@ func (d *DB) Len(key string) (int, error) {
 	var result struct {
 		Count int64
 	}
-	err := d.store.DB.Model(&store.RHash{}).
+	err := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -530,7 +543,7 @@ func (d *DB) Len(key string) (int, error) {
 func (d *DB) Random(key string) (HashItem, error) {
 	now := time.Now().UnixMilli()
 	var rhash store.RHash
-	err := d.store.DB.Model(&store.RHash{}).
+	err := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now), store.RandomOrder(d.store.Dialect)).
@@ -550,7 +563,7 @@ func (d *DB) RandFields(key string, count int) ([]HashItem, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RHash
 
-	query := d.store.DB.Model(&store.RHash{}).
+	query := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now))
@@ -591,7 +604,7 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 	var results []store.RHash
 
 	// Use database-level pagination with cursor-based approach
-	query := d.store.DB.Model(&store.RHash{}).
+	query := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -713,7 +726,7 @@ func (d *DB) Set(key, field string, value any) (bool, error) {
 	}
 	created := false
 	item := hashWriteItem{field: field, value: vb, created: &created}
-	err = d.store.TransactionWriteItems(context.Background(),
+	err = d.store.TransactionWriteItems(d.ctx,
 		d.writeScope(key)+"\x00"+field, item,
 		func(tx *gorm.DB, _ store.Dialect, items []any) error {
 			last := items[len(items)-1].(hashWriteItem)
@@ -867,7 +880,7 @@ func (d *DB) SetMany(key string, items map[string]any) (int, error) {
 	}
 
 	var newCount int
-	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err := d.store.TransactionRetry(d.ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 		rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key, core.TypeHash.Value(), now, 0)
 		if err != nil {
@@ -915,7 +928,7 @@ func (d *DB) StrLen(key, field string) (int, error) {
 	var result struct {
 		Len int
 	}
-	err := d.store.DB.Model(&store.RHash{}).
+	err := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rhash.kfield = ?", d.dbIdx, key, field).
 		Scopes(store.NotExpired(now)).
@@ -935,7 +948,7 @@ func (d *DB) StrLen(key, field string) (int, error) {
 func (d *DB) Values(key string) ([]core.Value, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RHash
-	err := d.store.DB.Model(&store.RHash{}).
+	err := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -955,7 +968,7 @@ func (d *DB) Values(key string) ([]core.Value, error) {
 func (d *DB) Items(key string) (map[string]core.Value, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RHash
-	err := d.store.DB.Model(&store.RHash{}).
+	err := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -976,7 +989,7 @@ func (d *DB) RandField(key string, count int, withValues bool) ([]HashItem, erro
 	now := time.Now().UnixMilli()
 	var results []store.RHash
 
-	query := d.store.DB.Model(&store.RHash{}).
+	query := d.db().Model(&store.RHash{}).
 		Joins("JOIN rkey ON rhash.kid = rkey.id AND rkey.ktype = ?", core.TypeHash.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now), store.RandomOrder(d.store.Dialect))
@@ -1015,7 +1028,7 @@ func (d *DB) SetNotExists(key, field string, value any) (bool, error) {
 	}
 
 	var created bool
-	err = d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err = d.store.TransactionRetry(d.ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 		rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key, core.TypeHash.Value(), now, 0)
 		if err != nil {

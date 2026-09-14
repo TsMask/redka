@@ -1,6 +1,7 @@
 package rkey
 
 import (
+	"context"
 	"testing"
 
 	"github.com/tsmask/redka/internal/store"
@@ -16,14 +17,14 @@ func TestDeleteAllInDB(t *testing.T) {
 	seedLogicalDB(t, db, 0)
 	seedLogicalDB(t, db, 1)
 
-	if err := New(db).WithDB(0).DeleteAllInDB(); err != nil {
+	if err := New(context.Background(), db).WithDB(0).DeleteAllInDB(); err != nil {
 		t.Fatalf("DeleteAllInDB: %v", err)
 	}
 
-	if count := repositoryLen(t, New(db).WithDB(0)); count != 0 {
+	if count := repositoryLen(t, New(context.Background(), db).WithDB(0)); count != 0 {
 		t.Fatalf("db 0 length after FLUSHDB = %d, want 0", count)
 	}
-	if count := repositoryLen(t, New(db).WithDB(1)); count != 5 {
+	if count := repositoryLen(t, New(context.Background(), db).WithDB(1)); count != 5 {
 		t.Fatalf("db 1 length after DB 0 FLUSHDB = %d, want 5", count)
 	}
 	valueTables := []string{"rstring", "rlist", "rset", "rhash", "rzset"}
@@ -36,11 +37,11 @@ func TestDeleteAllInDB(t *testing.T) {
 		}
 	}
 
-	if err := New(db).DeleteAll(); err != nil {
+	if err := New(context.Background(), db).DeleteAll(); err != nil {
 		t.Fatalf("DeleteAll: %v", err)
 	}
 	for dbIdx := 0; dbIdx < 2; dbIdx++ {
-		if count := repositoryLen(t, New(db).WithDB(dbIdx)); count != 0 {
+		if count := repositoryLen(t, New(context.Background(), db).WithDB(dbIdx)); count != 0 {
 			t.Fatalf("db %d length after FLUSHALL = %d, want 0", dbIdx, count)
 		}
 		for _, table := range valueTables {

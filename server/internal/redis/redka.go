@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"context"
 	"time"
 
 	"github.com/tsmask/redka/internal/core"
@@ -140,29 +141,52 @@ type RZSet interface {
 	UnionWith(keys ...string) rzset.UnionCmd
 }
 
-// Redka is an abstraction for *redka.DB and *redka.Tx.
-// Used to execute commands in a unified way.
 type Redka struct {
+	ctx   context.Context
 	store *store.Store
-	hash  RHash
-	key   RKey
-	list  RList
-	set   RSet
-	str   RStr
-	zset  RZSet
+	dbIdx int
+	hash  *rhash.DB
+	key   *rkey.DB
+	list  *rlist.DB
+	set   *rset.DB
+	str   *rstring.DB
+	zset  *rzset.DB
 }
 
 // NewRedka creates a new Redka instance from a store.Store and database index.
 // This is the primary constructor for simplified architecture.
-func NewRedka(s *store.Store, dbIdx int) Redka {
+func NewRedka(ctx context.Context, s *store.Store, dbIdx int) Redka {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return Redka{
+		ctx:   ctx,
 		store: s,
-		hash:  rhash.New(s).WithDB(dbIdx),
-		key:   rkey.New(s).WithDB(dbIdx),
-		list:  rlist.New(s).WithDB(dbIdx),
-		set:   rset.New(s).WithDB(dbIdx),
-		str:   rstring.New(s).WithDB(dbIdx),
-		zset:  rzset.New(s).WithDB(dbIdx),
+		dbIdx: dbIdx,
+		hash:  rhash.New(ctx, s).WithDB(dbIdx),
+		key:   rkey.New(ctx, s).WithDB(dbIdx),
+		list:  rlist.New(ctx, s).WithDB(dbIdx),
+		set:   rset.New(ctx, s).WithDB(dbIdx),
+		str:   rstring.New(ctx, s).WithDB(dbIdx),
+		zset:  rzset.New(ctx, s).WithDB(dbIdx),
+	}
+}
+
+// WithContext returns a copy of Redka bound to ctx. The original is not modified.
+func (r Redka) WithContext(ctx context.Context) Redka {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return Redka{
+		ctx:   ctx,
+		store: r.store,
+		dbIdx: r.dbIdx,
+		hash:  rhash.New(ctx, r.store).WithContext(ctx).WithDB(r.dbIdx),
+		key:   rkey.New(ctx, r.store).WithContext(ctx).WithDB(r.dbIdx),
+		list:  rlist.New(ctx, r.store).WithContext(ctx).WithDB(r.dbIdx),
+		set:   rset.New(ctx, r.store).WithContext(ctx).WithDB(r.dbIdx),
+		str:   rstring.New(ctx, r.store).WithContext(ctx).WithDB(r.dbIdx),
+		zset:  rzset.New(ctx, r.store).WithContext(ctx).WithDB(r.dbIdx),
 	}
 }
 

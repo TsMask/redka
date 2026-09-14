@@ -45,12 +45,25 @@ const scanPageSize = 10
 type DB struct {
 	store *store.Store
 	dbIdx int
+	ctx   context.Context
 }
 
 // New connects to the sorted set repository.
 // Does not create the database schema.
-func New(s *store.Store) *DB {
-	return &DB{store: s, dbIdx: 0}
+func New(ctx context.Context, s *store.Store) *DB {
+	return &DB{store: s, dbIdx: 0, ctx: ctx}
+}
+
+// WithContext returns a copy of DB bound to ctx.
+func (d *DB) WithContext(ctx context.Context) *DB {
+	newDB := *d
+	newDB.ctx = ctx
+	return &newDB
+}
+
+// db returns the store view bound to this DB's context.
+func (d *DB) db() *gorm.DB {
+	return d.store.WithContext(d.ctx).DB
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -72,7 +85,7 @@ func (d *DB) Add(key string, elem any, score float64) (bool, error) {
 	}
 	created := false
 	item := zsetWriteItem{elem: elemb, score: score, created: &created}
-	err = d.store.TransactionWriteItems(context.Background(),
+	err = d.store.TransactionWriteItems(d.ctx,
 		d.writeScope(key)+"\x00"+string(elemb), item,
 		func(tx *gorm.DB, _ store.Dialect, items []any) error {
 			last := items[len(items)-1].(zsetWriteItem)
@@ -225,7 +238,7 @@ func (d *DB) AddMany(key string, items map[any]float64) (int, error) {
 	}
 
 	var created int
-	err := d.store.TransactionRetry(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err := d.store.TransactionRetry(d.ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 		rkey, err := store.EnsureKey(tx, dialect, d.dbIdx, key, core.TypeZSet.Value(), now, 0)
 		if err != nil {
@@ -269,7 +282,7 @@ func (d *DB) AddMany(key string, items map[any]float64) (int, error) {
 func (d *DB) Count(key string, min, max float64) (int, error) {
 	now := time.Now().UnixMilli()
 	var count int64
-	err := d.store.DB.Model(&store.RZSet{}).
+	err := d.db().Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Where("rkey.ktype = ?", core.TypeZSet.Value()).
@@ -292,7 +305,7 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 
 	var n int64
 
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err = d.store.Transaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		now := time.Now().UnixMilli()
 		var rkey store.RKey
 		err := tx.Model(&store.RKey{}).
@@ -345,7 +358,7 @@ func (d *DB) GetRank(key string, elem any) (rank int, score float64, err error) 
 	var result struct {
 		Score float64
 	}
-	err = d.store.DB.Model(&store.RZSet{}).
+	err = d.db().Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rzset.elem = ?", d.dbIdx, key, elemb).
 		Scopes(store.NotExpired(now)).
@@ -362,7 +375,7 @@ func (d *DB) GetRank(key string, elem any) (rank int, score float64, err error) 
 	// Count elements with score less than the target score, or equal score
 	// but lexicographically smaller element (for tie-breaking in ascending order)
 	var count int64
-	err = d.store.DB.Model(&store.RZSet{}).
+	err = d.db().Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -386,7 +399,7 @@ func (d *DB) GetRankRev(key string, elem any) (rank int, score float64, err erro
 	var result struct {
 		Score float64
 	}
-	err = d.store.DB.Model(&store.RZSet{}).
+	err = d.db().Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rzset.elem = ?", d.dbIdx, key, elemb).
 		Scopes(store.NotExpired(now)).
@@ -401,7 +414,7 @@ func (d *DB) GetRankRev(key string, elem any) (rank int, score float64, err erro
 	}
 
 	var count int64
-	err = d.store.DB.Model(&store.RZSet{}).
+	err = d.db().Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -424,7 +437,7 @@ func (d *DB) GetScore(key string, elem any) (float64, error) {
 	var result struct {
 		Score float64
 	}
-	err = d.store.DB.Model(&store.RZSet{}).
+	err = d.db().Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rzset.elem = ?", d.dbIdx, key, elemb).
 		Scopes(store.NotExpired(now)).
@@ -449,7 +462,7 @@ func (d *DB) Incr(key string, elem any, delta float64) (float64, error) {
 
 	newScore := 0.0
 	item := zsetIncrWriteItem{delta: delta, score: &newScore}
-	err = d.store.TransactionWriteItems(context.Background(),
+	err = d.store.TransactionWriteItems(d.ctx,
 		d.writeScope(key)+"\x00"+string(elemb),
 		item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
@@ -639,7 +652,7 @@ func (d *DB) InterWith(keys ...string) InterCmd {
 func (d *DB) Len(key string) (int, error) {
 	now := time.Now().UnixMilli()
 	var count int64
-	err := d.store.DB.Model(&store.RZSet{}).
+	err := d.db().Model(&store.RZSet{}).
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -651,7 +664,7 @@ func (d *DB) Len(key string) (int, error) {
 func (d *DB) Range(key string, start, stop int) ([]SetItem, error) {
 	now := time.Now().UnixMilli()
 	var rkey store.RKey
-	err := d.store.DB.Model(&store.RKey{}).
+	err := d.db().Model(&store.RKey{}).
 		Where("kdb = ? AND kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		First(&rkey).Error
@@ -663,7 +676,7 @@ func (d *DB) Range(key string, start, stop int) ([]SetItem, error) {
 	}
 
 	var results []store.RZSet
-	err = d.store.DB.Where("kid = ?", rkey.ID).
+	err = d.db().Where("kid = ?", rkey.ID).
 		Order("score ASC, elem ASC").
 		Offset(start).
 		Limit(stop - start + 1).
@@ -694,7 +707,7 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 
 	now := time.Now().UnixMilli()
 	var rkey store.RKey
-	err := d.store.DB.Model(&store.RKey{}).
+	err := d.db().Model(&store.RKey{}).
 		Where("kdb = ? AND kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
 		First(&rkey).Error
@@ -708,7 +721,7 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 	var results []store.RZSet
 
 	// Query in score order (correct Redis semantics)
-	query := d.store.DB.Where("kid = ?", rkey.ID).
+	query := d.db().Where("kid = ?", rkey.ID).
 		Order("score ASC, elem ASC, id ASC").
 		Limit(count)
 
@@ -716,7 +729,7 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 	if cursor > 0 {
 		// Query the score of the cursor ID
 		var lastItem store.RZSet
-		err := d.store.DB.Select("score").
+		err := d.db().Select("score").
 			Where("kid = ? AND id = ?", rkey.ID, cursor).
 			First(&lastItem).Error
 
@@ -780,7 +793,7 @@ func (d *DB) UnionWith(keys ...string) UnionCmd {
 func (d *DB) DeleteByRank(key string, start, stop int) (int, error) {
 	var n int64
 
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := d.store.Transaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		now := time.Now().UnixMilli()
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
@@ -839,7 +852,7 @@ func (d *DB) DeleteByRank(key string, start, stop int) (int, error) {
 func (d *DB) DeleteByScore(key string, min, max float64) (int, error) {
 	var n int64
 
-	err := d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := d.store.Transaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		now := time.Now().UnixMilli()
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
@@ -878,7 +891,7 @@ func (d *DB) GetRange(key string, start, stop int) ([]core.Value, []float64, err
 	now := time.Now().UnixMilli()
 
 	var keyMeta store.RKey
-	err := d.store.DB.Model(&store.RKey{}).
+	err := d.db().Model(&store.RKey{}).
 		Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeZSet.Value()).
 		Scopes(store.NotExpired(now)).
 		First(&keyMeta).Error
@@ -899,7 +912,7 @@ func (d *DB) GetRange(key string, start, stop int) ([]core.Value, []float64, err
 		Elem  []byte
 		Score float64
 	}
-	err = d.store.DB.Model(&store.RZSet{}).
+	err = d.db().Model(&store.RZSet{}).
 		Select("elem, score").
 		Where("kid = ?", keyMeta.ID).
 		Order("score ASC, elem ASC").
@@ -927,7 +940,7 @@ func (d *DB) GetRangeByScore(key string, min, max float64) ([]core.Value, []floa
 		Elem  []byte
 		Score float64
 	}
-	err := d.store.DB.Model(&store.RZSet{}).
+	err := d.db().Model(&store.RZSet{}).
 		Select("rzset.elem as elem, rzset.score as score").
 		Joins("JOIN rkey ON rzset.kid = rkey.id").
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
@@ -1192,7 +1205,7 @@ func (c DeleteCmd) deleteRank(now int64) (int, error) {
 	}
 
 	var n int64
-	err := c.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := c.db.store.Transaction(c.db.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = ?", c.db.dbIdx, c.key, core.TypeZSet.Value()).
@@ -1250,7 +1263,7 @@ func (c DeleteCmd) deleteRank(now int64) (int, error) {
 // Uses transaction with row-level locking to prevent race conditions.
 func (c DeleteCmd) deleteScore(now int64) (int, error) {
 	var n int64
-	err := c.db.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err := c.db.store.Transaction(c.db.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		var keyMeta store.RKey
 		err := tx.Model(&store.RKey{}).
 			Where("kdb = ? AND kname = ? AND ktype = ?", c.db.dbIdx, c.key, core.TypeZSet.Value()).
@@ -1371,7 +1384,7 @@ func (c InterCmd) Store() (int, error) {
 		aggregate: c.aggregate,
 		count:     &resultCount,
 	}
-	err := c.db.store.TransactionWriteItems(context.Background(),
+	err := c.db.store.TransactionWriteItems(c.db.ctx,
 		"zset:store:inter:"+strconv.Itoa(c.db.dbIdx)+"\x00"+c.dest, item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			return c.db.writeZSetStoreItems(tx, dialect, c.dest, items,
@@ -1603,7 +1616,7 @@ func (c UnionCmd) Store() (int, error) {
 		aggregate: c.aggregate,
 		count:     &resultCount,
 	}
-	err := c.db.store.TransactionWriteItems(context.Background(),
+	err := c.db.store.TransactionWriteItems(c.db.ctx,
 		"zset:store:union:"+strconv.Itoa(c.db.dbIdx)+"\x00"+c.dest, item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			return c.db.writeZSetStoreItems(tx, dialect, c.dest, items,

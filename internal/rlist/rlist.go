@@ -35,12 +35,25 @@ const listPositionInterval = 1000
 type DB struct {
 	store *store.Store
 	dbIdx int
+	ctx   context.Context
 }
 
 // New connects to the list repository.
 // Does not create the database schema.
-func New(s *store.Store) *DB {
-	return &DB{store: s, dbIdx: 0}
+func New(ctx context.Context, s *store.Store) *DB {
+	return &DB{store: s, dbIdx: 0, ctx: ctx}
+}
+
+// WithContext returns a copy of DB bound to ctx.
+func (d *DB) WithContext(ctx context.Context) *DB {
+	newDB := *d
+	newDB.ctx = ctx
+	return &newDB
+}
+
+// db returns the store view bound to this DB's context.
+func (d *DB) db() *gorm.DB {
+	return d.store.WithContext(d.ctx).DB
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -62,7 +75,7 @@ func (d *DB) Delete(key string, elem any) (int, error) {
 	}
 
 	var n int
-	err = d.store.TransactionWrite(context.Background(), d.writeScope("delete", key),
+	err = d.store.TransactionWrite(d.ctx, d.writeScope("delete", key),
 		func(tx *gorm.DB, _ store.Dialect) error {
 			now := time.Now().UnixMilli()
 
@@ -121,7 +134,7 @@ func (d *DB) Get(key string, idx int) (core.Value, error) {
 	now := time.Now().UnixMilli()
 
 	var rkey store.RKey
-	err := d.store.DB.Model(&store.RKey{}).
+	err := d.db().Model(&store.RKey{}).
 		Select("id", "klen").
 		Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 		Scopes(store.NotExpired(now)).
@@ -142,7 +155,7 @@ func (d *DB) Get(key string, idx int) (core.Value, error) {
 	}
 
 	var rlist store.RList
-	err = d.store.DB.Where("kid = ?", rkey.ID).
+	err = d.db().Where("kid = ?", rkey.ID).
 		Order("pos ASC").
 		Offset(actualIdx).
 		Limit(1).
@@ -174,7 +187,7 @@ func (d *DB) Len(key string) (int, error) {
 	now := time.Now().UnixMilli()
 
 	var rkey store.RKey
-	err := d.store.DB.Model(&store.RKey{}).
+	err := d.db().Model(&store.RKey{}).
 		Select("klen").
 		Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 		Scopes(store.NotExpired(now)).
@@ -216,7 +229,7 @@ type listPopItem struct {
 }
 
 func (d *DB) pop(key string, front bool, item listPopItem) error {
-	return d.store.TransactionWriteItems(context.Background(),
+	return d.store.TransactionWriteItems(d.ctx,
 		d.writeScope("pop", key), item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			run := func(tx *gorm.DB) error {
@@ -297,7 +310,7 @@ func (d *DB) PopBackPushFront(src, dest string) (core.Value, error) {
 
 	elem := []byte(nil)
 	item := listMoveItem{elem: &elem}
-	err := d.store.TransactionWriteItems(context.Background(), d.moveScope(src, dest), item,
+	err := d.store.TransactionWriteItems(d.ctx, d.moveScope(src, dest), item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			run := func(tx *gorm.DB) error {
 				now := time.Now().UnixMilli()
@@ -475,7 +488,7 @@ type listMoveItem struct {
 
 func (d *DB) popBackPushFrontSingle(src, dest string) (core.Value, error) {
 	var elem []byte
-	err := d.store.TransactionWrite(context.Background(), d.moveScope(src, dest),
+	err := d.store.TransactionWrite(d.ctx, d.moveScope(src, dest),
 		func(tx *gorm.DB, dialect store.Dialect) error {
 			now := time.Now().UnixMilli()
 
@@ -676,7 +689,7 @@ func (d *DB) Range(key string, start, stop int) ([]core.Value, error) {
 	now := time.Now().UnixMilli()
 
 	var rkey store.RKey
-	err := d.store.DB.Model(&store.RKey{}).
+	err := d.db().Model(&store.RKey{}).
 		Select("id", "klen").
 		Where("kdb = ? AND kname = ? AND ktype = ?", d.dbIdx, key, core.TypeList.Value()).
 		Scopes(store.NotExpired(now)).
@@ -709,7 +722,7 @@ func (d *DB) Range(key string, start, stop int) ([]core.Value, error) {
 	count := actualStop - actualStart + 1
 
 	var rlists []store.RList
-	err = d.store.DB.Where("kid = ?", rkey.ID).
+	err = d.db().Where("kid = ?", rkey.ID).
 		Order("pos ASC").
 		Offset(actualStart).
 		Limit(count).
@@ -733,7 +746,7 @@ func (d *DB) Set(key string, idx int, elem any) error {
 	}
 
 	item := listSetWriteItem{index: idx, elem: elemb}
-	return d.store.TransactionWriteItems(context.Background(),
+	return d.store.TransactionWriteItems(d.ctx,
 		d.writeScope("set", key), item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			needsKey := dialect != store.DialectMySQL
@@ -858,7 +871,7 @@ func (d *DB) updateListPosition(tx *gorm.DB, dialect store.Dialect,
 // Trim trims a list so that it contains only the specified range of elements.
 func (d *DB) Trim(key string, start, stop int) error {
 	item := listTrimItem{start: start, stop: stop}
-	return d.store.TransactionWriteItems(context.Background(),
+	return d.store.TransactionWriteItems(d.ctx,
 		d.writeScope("trim", key), item,
 		func(tx *gorm.DB, _ store.Dialect, items []any) error {
 			groups := make(map[string][]listTrimItem)
@@ -982,7 +995,7 @@ func (d *DB) delete(key string, elem any, count int, fromBack bool) (int, error)
 	item := listDeleteCountItem{
 		elem: elemb, count: count, fromBack: fromBack, deleted: &deleted,
 	}
-	err = d.store.TransactionWriteItems(context.Background(),
+	err = d.store.TransactionWriteItems(d.ctx,
 		d.writeScope("delete-count", key), item,
 		func(tx *gorm.DB, _ store.Dialect, items []any) error {
 			var rkey store.RKey
@@ -1143,7 +1156,7 @@ func (d *DB) insert(key string, pivot any, elem any, after bool) (int, error) {
 	item := listInsertItem{
 		pivot: pivotb, elem: elemb, after: after, length: &newLen,
 	}
-	err = d.store.TransactionWriteItems(context.Background(),
+	err = d.store.TransactionWriteItems(d.ctx,
 		d.writeScope("insert", key), item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			run := func(tx *gorm.DB) error {
@@ -1362,7 +1375,7 @@ func (d *DB) insertSlow(key string, pivot any, elem any, after bool) (int, error
 	}
 
 	var newLen int64
-	err = d.store.TransactionWrite(context.Background(), d.writeScope("insert", key),
+	err = d.store.TransactionWrite(d.ctx, d.writeScope("insert", key),
 		func(tx *gorm.DB, dialect store.Dialect) error {
 			var rkey store.RKey
 			keyQuery := tx.Model(&store.RKey{}).
@@ -1534,7 +1547,7 @@ func (d *DB) pushMany(key string, elems []any, back bool) (int, error) {
 	}
 	item := listPushBatch{items: pushes}
 	var err error
-	err = d.store.TransactionWriteItems(context.Background(),
+	err = d.store.TransactionWriteItems(d.ctx,
 		"list:push:"+strconv.Itoa(d.dbIdx)+"\x00"+key, item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			run := func(tx *gorm.DB) error {

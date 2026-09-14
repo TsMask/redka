@@ -39,6 +39,7 @@ const scanPageSize = 10
 type DB struct {
 	store *store.Store
 	dbIdx int
+	ctx   context.Context
 }
 
 // Scanner is the iterator for set items.
@@ -57,8 +58,20 @@ type Scanner struct {
 
 // New connects to the set repository.
 // Does not create the database schema.
-func New(s *store.Store) *DB {
-	return &DB{store: s, dbIdx: 0}
+func New(ctx context.Context, s *store.Store) *DB {
+	return &DB{store: s, dbIdx: 0, ctx: ctx}
+}
+
+// WithContext returns a copy of DB bound to ctx.
+func (d *DB) WithContext(ctx context.Context) *DB {
+	newDB := *d
+	newDB.ctx = ctx
+	return &newDB
+}
+
+// db returns the store view bound to this DB's context.
+func (d *DB) db() *gorm.DB {
+	return d.store.WithContext(d.ctx).DB
 }
 
 // WithDB changes the logical database index in place and returns the same DB.
@@ -95,7 +108,7 @@ func (d *DB) Add(key string, elems ...any) (int, error) {
 
 	var newCount int
 	item := setAddWriteItem{elems: elembs, count: &newCount}
-	err = d.store.TransactionWriteItems(context.Background(),
+	err = d.store.TransactionWriteItems(d.ctx,
 		"set:add:"+strconv.Itoa(d.dbIdx)+"\x00"+key, item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			now := time.Now().UnixMilli()
@@ -211,7 +224,7 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 	}
 
 	var n int
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, _ store.Dialect) error {
+	err = d.store.Transaction(d.ctx, func(tx *gorm.DB, _ store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		var rkey store.RKey
@@ -250,7 +263,7 @@ func (d *DB) Delete(key string, elems ...any) (int, error) {
 
 // Diff returns the difference between the first set and the rest.
 func (d *DB) Diff(keys ...string) ([]core.Value, error) {
-	return d.diffTx(d.store.DB, keys...)
+	return d.diffTx(d.db(), keys...)
 }
 
 func (d *DB) diffTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
@@ -401,7 +414,7 @@ func (d *DB) writeSetStore(op, dest string, keys []string,
 	compute func(tx *gorm.DB, dialect store.Dialect, keys []string) (int, error)) (int, error) {
 	resultCount := 0
 	item := setStoreWriteItem{keys: keys, count: &resultCount}
-	err := d.store.TransactionWriteItems(context.Background(),
+	err := d.store.TransactionWriteItems(d.ctx,
 		"set:store:"+op+":"+strconv.Itoa(d.dbIdx)+"\x00"+dest, item,
 		func(tx *gorm.DB, dialect store.Dialect, items []any) error {
 			groups := make(map[string][]setStoreWriteItem)
@@ -539,7 +552,7 @@ func (d *DB) Exists(key string, elem any) (bool, error) {
 	var result struct {
 		Count int64
 	}
-	err = d.store.DB.Model(&store.RSet{}).
+	err = d.db().Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rset.elem = ?", d.dbIdx, key, elemb).
 		Scopes(store.NotExpired(now)).
@@ -550,7 +563,7 @@ func (d *DB) Exists(key string, elem any) (bool, error) {
 
 // Inter returns the intersection of multiple sets.
 func (d *DB) Inter(keys ...string) ([]core.Value, error) {
-	return d.interTx(d.store.DB, keys...)
+	return d.interTx(d.db(), keys...)
 }
 
 func (d *DB) interTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
@@ -665,7 +678,7 @@ func (d *DB) ExistsMany(key string, members ...any) ([]bool, error) {
 
 	now := time.Now().UnixMilli()
 	var results []store.RSet
-	err = d.store.DB.Model(&store.RSet{}).
+	err = d.db().Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rset.elem IN ?", d.dbIdx, key, elembs).
 		Scopes(store.NotExpired(now)).
@@ -691,7 +704,7 @@ func (d *DB) ExistsMany(key string, members ...any) ([]bool, error) {
 func (d *DB) Items(key string) ([]core.Value, error) {
 	now := time.Now().UnixMilli()
 	var results []store.RSet
-	err := d.store.DB.Model(&store.RSet{}).
+	err := d.db().Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -713,7 +726,7 @@ func (d *DB) Len(key string) (int, error) {
 	var result struct {
 		Count int64
 	}
-	err := d.store.DB.Model(&store.RSet{}).
+	err := d.db().Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -734,7 +747,7 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 	var sourceRow struct {
 		ID int `gorm:"column:id"`
 	}
-	err = d.store.DB.Model(&store.RSet{}).
+	err = d.db().Model(&store.RSet{}).
 		Select("rset.kid AS id").
 		Joins("JOIN rkey ON rkey.id = rset.kid").
 		Where("rkey.kdb = ? AND rkey.kname = ? AND rkey.ktype = ? AND rset.elem = ?",
@@ -751,7 +764,7 @@ func (d *DB) Move(src, dest string, elem any) (bool, error) {
 	}
 
 	var moved bool
-	err = d.store.Transaction(context.Background(), func(tx *gorm.DB, dialect store.Dialect) error {
+	err = d.store.Transaction(d.ctx, func(tx *gorm.DB, dialect store.Dialect) error {
 		now := time.Now().UnixMilli()
 
 		// 死锁预防：按键名排序后加锁，确保固定的锁定顺序
@@ -909,7 +922,7 @@ func (d *DB) Pop(key string) (core.Value, error) {
 	elem := core.Value{}
 	err := error(nil)
 	item := setPopWriteItem{elem: &elem, err: &err}
-	err = d.store.TransactionWriteItems(context.Background(), d.writeScope(key), item,
+	err = d.store.TransactionWriteItems(d.ctx, d.writeScope(key), item,
 		func(tx *gorm.DB, _ store.Dialect, items []any) error {
 			now := time.Now().UnixMilli()
 			pops := make([]setPopWriteItem, 0, len(items))
@@ -976,7 +989,7 @@ type setPopWriteItem struct {
 func (d *DB) Random(key string) (core.Value, error) {
 	now := time.Now().UnixMilli()
 	var rset store.RSet
-	err := d.store.DB.Model(&store.RSet{}).
+	err := d.db().Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now), store.RandomOrder(d.store.Dialect)).
@@ -996,7 +1009,7 @@ func (d *DB) RandMember(key string, count int) ([]core.Value, error) {
 	now := time.Now().UnixMilli()
 	var rsets []store.RSet
 
-	query := d.store.DB.Model(&store.RSet{}).
+	query := d.db().Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now))
@@ -1037,7 +1050,7 @@ func (d *DB) Scan(key string, cursor int, pattern string, count int) (ScanResult
 	var results []store.RSet
 
 	// Use database-level pagination with cursor-based approach
-	query := d.store.DB.Model(&store.RSet{}).
+	query := d.db().Model(&store.RSet{}).
 		Joins("JOIN rkey ON rset.kid = rkey.id AND rkey.ktype = ?", core.TypeSet.Value()).
 		Where("rkey.kdb = ? AND rkey.kname = ?", d.dbIdx, key).
 		Scopes(store.NotExpired(now)).
@@ -1152,7 +1165,7 @@ func (s *Scanner) Err() error {
 
 // Union returns the union of multiple sets.
 func (d *DB) Union(keys ...string) ([]core.Value, error) {
-	return d.unionTx(d.store.DB, keys...)
+	return d.unionTx(d.db(), keys...)
 }
 
 func (d *DB) unionTx(db *gorm.DB, keys ...string) ([]core.Value, error) {
