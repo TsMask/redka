@@ -102,12 +102,12 @@ Redka 使用 GORM 作为 ORM，支持三种关系型数据库后端：
 镜像使用两阶段构建：builder 只复制构建所需源码，runtime 使用 Alpine 并安装 CA 证书，保留 shell 便于部署排查。镜像工作目录为 `/usr/local/etc/redka`，默认使用打包的示例配置启动内存 SQLite；镜像内不额外设置用户。生产配置应在运行时只读挂载。
 
 ```bash
-docker build --build-arg VERSION=1.5.1 \
+docker build --build-arg VERSION=1.5.0 \
   --build-arg COMMIT="$(git rev-parse --short HEAD)" \
   --build-arg DATE="$(date -u '+%Y-%m-%dT%H:%M:%S')" \
-  -t redka:1.5.1 .
+  -t redka:1.5.0 .
 
-docker run --rm --publish 6380:6379 redka:1.5.1
+docker run --rm --publish 6380:6379 redka:1.5.0
 ```
 
 如需替换默认配置：
@@ -115,7 +115,7 @@ docker run --rm --publish 6380:6379 redka:1.5.1
 ```bash
 docker run --rm --publish 6380:6379 \
   --volume "$PWD/redka.yaml:/etc/redka/redka.yaml:ro" \
-  redka:1.5.1 -c /etc/redka/redka.yaml
+  redka:1.5.0 -c /etc/redka/redka.yaml
 ```
 
 如需使用文件 SQLite 或本地 Unix socket，相关路径必须对容器运行用户可写。镜像声明了 `6360/tcp`，但 pprof 只在 `verbose` 开启时监听 `{host}:6360`；端口仍需显式 `--publish` 才能被宿主机访问。
@@ -190,10 +190,10 @@ sudo bash scripts/test/test_set_commands.sh 6380 localhost password
 
 ```bash
 # 打包 Deb 包
-sudo bash scripts/build/build-deb.sh -v 1.5.1
+sudo bash scripts/build/build-deb.sh -v 1.5.0
 
 # 打包 RPM 包
-sudo bash scripts/build/build-rpm.sh -v 1.5.1
+sudo bash scripts/build/build-rpm.sh -v 1.5.0
 
 # 普通二进制
 make build
