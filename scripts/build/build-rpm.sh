@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 set -e
-export PATH=$PATH:/usr/local/go/bin
 
-VERSION="1.5.0"
+# 版本号优先取环境变量 VERSION，其次取 -v 参数，最后用默认值
+VERSION="${VERSION:-1.5.0}"
 PKG_NAME="redka"
 
 while getopts "v:h" opt; do
@@ -31,8 +31,12 @@ esac
 PKG_VERSION="${PKG_NAME}-${VERSION}-${OS_ID}${OS_VERSION_ID}.${ARCH}.rpm"
 PKG_OUTPUT="${PKG_NAME}-${VERSION}-${OS_ID}${OS_VERSION_ID}-${PKG_ARCH}.rpm"
 
-## Build binary
-cd "${PROJECT_DIR}" && make build
+## Check binary, it is produced by "make build"
+BINARY="${PROJECT_DIR}/build/redka"
+if [ ! -x "${BINARY}" ]; then
+    echo "Error: ${BINARY} not found, please run: make build VERSION=\"${VERSION}\"" >&2
+    exit 1
+fi
 
 ## Build RPM package
 DEST_DIR="${SCRIPTS_DIR}/dist"

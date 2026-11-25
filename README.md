@@ -2,9 +2,9 @@
 
 <img alt="Redka" src="logo.svg" height="80" align="center">
 
-> 本项目基于 [fork nalgeon/redka](https://github.com/nalgeon/redka) 二次开发
-
 Redka 是一个用 Go 语言实现的 Redis 兼容服务器，使用关系型数据库作为后端存储，同时保持与 Redis API 的完全兼容。
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/tsmask/redka.svg)](https://pkg.go.dev/github.com/tsmask/redka)
 
 ## 特性
 
@@ -189,15 +189,18 @@ sudo bash scripts/test/test_set_commands.sh 6380 localhost password
 ## 打包
 
 ```bash
-# 打包 Deb 包
-sudo bash scripts/build/build-deb.sh -v 1.5.0
+# 普通二进制，产物在 build/redka
+make build VERSION="${VERSION}"
 
-# 打包 RPM 包
-sudo bash scripts/build/build-rpm.sh -v 1.5.0
+# 打包 Deb 包，产物在 build/redka-<版本>-<系统>-<架构>.deb
+make build-deb VERSION="${VERSION}"
 
-# 普通二进制
-make build
+# 打包 RPM 包，产物在 build/redka-<版本>-<系统>-<架构>.rpm
+make build-rpm VERSION="${VERSION}"
 ```
+
+`VERSION` 省略时使用默认版本号。打包命令会先执行 `make build`，
+再由 `scripts/build/` 下的脚本把可执行文件打成 deb/rpm 包，脚本本身不做编译。
 
 ## 贡献
 
@@ -207,7 +210,7 @@ make build
 
 ## 致谢
 
-Redka 的实现离不开这些优秀项目及其创建者：
+项目基于 [fork nalgeon/redka](https://github.com/nalgeon/redka) 二次开发，Redka 的实现离不开这些优秀项目及其创建者：
 
 - [Redis](https://redis.io/) ([Salvatore Sanfilippo](https://github.com/antirez)) - 提供超越 get-set 范式的数据结构便捷 API
 - [SQLite](https://sqlite.org/) ([D. Richard Hipp](https://www.sqlite.org/crew.html)) - 驱动世界的进程内数据库
@@ -215,6 +218,7 @@ Redka 的实现离不开这些优秀项目及其创建者：
 - [GORM](https://gorm.io/) - Go 语言的 ORM 库
 
 Logo 字体由 [Ek Type](https://ektype.in/) 提供。
+
 
 ## License
 

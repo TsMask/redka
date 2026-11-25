@@ -1,19 +1,20 @@
-.PHONY: build
+.PHONY: setup vet build build-deb build-rpm run \
+	postgres-start postgres-stop postgres-shell \
+	mysql-start mysql-stop mysql-shell
+
+# 默认版本号，打包时可用 VERSION=xxx 覆盖
+DEFAULT_VERSION := 1.5.0
 
 has_git := $(shell command -v git 2>/dev/null)
 
 ifdef has_git
-build_rev := $(shell git rev-parse --short HEAD)
-git_tag := $(shell git describe --tags --exact-match 2>/dev/null)
+build_rev := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 else
 build_rev := unknown
 endif
 
-ifdef git_tag
-build_ver := $(git_tag)
-else
-build_ver := 1.5.0
-endif
+# VERSION 可以从命令行覆盖，未指定时用默认版本号
+VERSION ?= $(DEFAULT_VERSION)
 
 build_date := $(shell date -u '+%Y-%m-%dT%H:%M:%S')
 
@@ -26,13 +27,24 @@ vet:
 	@echo "✓ finished vet"
 
 build:
-	@echo "> running build..."
+	@echo "> running build (version: $(VERSION))..."
+	@mkdir -p build
 	@go build -ldflags "-s -w \
-		-X github.com/tsmask/redka/config.Version=$(build_ver) \
+		-X github.com/tsmask/redka/config.Version=$(VERSION) \
 		-X github.com/tsmask/redka/config.Commit=$(build_rev) \
 		-X github.com/tsmask/redka/config.Date=$(build_date)" \
 		-trimpath -o build/redka cmd/redka/main.go
 	@echo "✓ finished build"
+
+build-deb: build
+	@echo "> running build-deb (version: $(VERSION))..."
+	@bash scripts/build/build-deb.sh -v "$(VERSION)"
+	@echo "✓ finished build-deb"
+
+build-rpm: build
+	@echo "> running build-rpm (version: $(VERSION))..."
+	@bash scripts/build/build-rpm.sh -v "$(VERSION)"
+	@echo "✓ finished build-rpm"
 
 run:
 	@chmod +x ./redka && ./redka
@@ -81,4 +93,8 @@ mysql-stop:
 
 mysql-shell:
 	@docker exec -it redka-mysql mysql --user=redka --password=redka --database=redka
-	
+
+# Example:
+# make build VERSION=1.5.2
+# make build-deb VERSION=1.5.2
+# make build-rpm VERSION=1.5.2
