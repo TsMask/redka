@@ -23,7 +23,21 @@ func ParsePersist(b redis.BaseCmd) (Persist, error) {
 }
 
 func (cmd Persist) Run(w redis.Writer, red redis.Redka) (any, error) {
-	err := red.Key().Persist(cmd.key)
+	key, err := red.Key().Get(cmd.key)
+	if err == core.ErrNotFound {
+		w.WriteInt(0)
+		return false, nil
+	}
+	if err != nil {
+		w.WriteError(cmd.Error(err))
+		return nil, err
+	}
+	if key.ETime == nil {
+		w.WriteInt(0)
+		return false, nil
+	}
+
+	err = red.Key().Persist(cmd.key)
 	if err != nil && err != core.ErrNotFound {
 		w.WriteError(cmd.Error(err))
 		return nil, err

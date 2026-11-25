@@ -13,19 +13,21 @@ import (
 
 // Redis-like errors.
 var (
-	ErrInvalidArgNum     = errors.New("ERR wrong number of arguments")
-	ErrInvalidCursor     = errors.New("ERR invalid cursor")
-	ErrInvalidExpireTime = errors.New("ERR invalid expire time")
-	ErrInvalidFloat      = errors.New("ERR value is not a float")
-	ErrInvalidInt        = errors.New("ERR value is not an integer")
-	ErrInvalidCount      = errors.New("ERR count should be greater than 0")
-	ErrNestedMulti       = errors.New("ERR MULTI calls can not be nested")
-	ErrNotFound          = errors.New("ERR no such key")
-	ErrNotInMulti        = errors.New("ERR EXEC without MULTI")
-	ErrOutOfRange        = errors.New("ERR index out of range")
-	ErrSyntaxError       = errors.New("ERR syntax error")
-	ErrUnknownCmd        = errors.New("ERR unknown command")
-	ErrUnknownSubcmd     = errors.New("ERR unknown subcommand")
+	ErrInvalidArgNum       = errors.New("ERR wrong number of arguments")
+	ErrInvalidCursor       = errors.New("ERR invalid cursor")
+	ErrInvalidExpireTime   = errors.New("ERR invalid expire time")
+	ErrInvalidFloat        = errors.New("ERR value is not a float")
+	ErrInvalidInt          = errors.New("ERR value is not an integer")
+	ErrInvalidCount        = errors.New("ERR count should be greater than 0")
+	ErrDiscardWithoutMulti = errors.New("ERR DISCARD without MULTI")
+	ErrNestedMulti         = errors.New("ERR MULTI calls can not be nested")
+	ErrNotFound            = errors.New("ERR no such key")
+	ErrNotInMulti          = errors.New("ERR EXEC without MULTI")
+	ErrOutOfRange          = errors.New("ERR index out of range")
+	ErrSyntaxError         = errors.New("ERR syntax error")
+	ErrUnknownCmd          = errors.New("ERR unknown command")
+	ErrUnknownSubcmd       = errors.New("ERR unknown subcommand")
+	ErrWatchInsideMulti    = errors.New("ERR WATCH inside MULTI is not allowed")
 )
 
 // Writer is an interface to write responses to the client.
@@ -49,6 +51,9 @@ type Writer interface {
 type Cmd interface {
 	// Name returns the command name.
 	Name() string
+
+	// Args returns the command arguments, excluding the command name.
+	Args() [][]byte
 
 	// String returns the command string representation (name and arguments).
 	String() string

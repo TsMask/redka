@@ -1,6 +1,7 @@
 package string
 
 import (
+	"github.com/tsmask/redka/internal/core"
 	"github.com/tsmask/redka/server/internal/parser"
 	"github.com/tsmask/redka/server/internal/redis"
 )
@@ -32,6 +33,22 @@ func ParseSetrange(b redis.BaseCmd) (Setrange, error) {
 }
 
 func (cmd Setrange) Run(w redis.Writer, red redis.Redka) (any, error) {
+	// An empty value never creates or modifies the key. Redis still reports
+	// the current length and still rejects a wrong-type key.
+	if len(cmd.value) == 0 {
+		val, err := red.Str().Get(cmd.key)
+		if err == core.ErrNotFound {
+			w.WriteInt(0)
+			return 0, nil
+		}
+		if err != nil {
+			w.WriteError(cmd.Error(err))
+			return nil, err
+		}
+		w.WriteInt(len(val))
+		return len(val), nil
+	}
+
 	length, err := red.Str().SetRange(cmd.key, cmd.offset, cmd.value)
 	if err != nil {
 		w.WriteError(cmd.Error(err))
@@ -46,7 +63,7 @@ func (cmd Setrange) Run(w redis.Writer, red redis.Redka) (any, error) {
 // https://redis.io/commands/getrange
 type Getrange struct {
 	redis.BaseCmd
-	key  string
+	key   string
 	start int
 	end   int
 }

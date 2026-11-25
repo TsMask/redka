@@ -29,11 +29,17 @@ func ParseLTrim(b redis.BaseCmd) (LTrim, error) {
 }
 
 func (cmd LTrim) Run(w redis.Writer, red redis.Redka) (any, error) {
-	err := red.List().Trim(cmd.key, cmd.start, cmd.stop)
+	// Redis only signals a watched key when it existed before LTRIM.
+	existed, err := red.Key().Exists(cmd.key)
+	if err != nil {
+		w.WriteError(cmd.Error(err))
+		return nil, err
+	}
+	err = red.List().Trim(cmd.key, cmd.start, cmd.stop)
 	if err != nil {
 		w.WriteError(cmd.Error(err))
 		return nil, err
 	}
 	w.WriteString("OK")
-	return "OK", nil
+	return existed, nil
 }

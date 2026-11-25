@@ -59,6 +59,8 @@ func Parse(args [][]byte) (redis.Cmd, error) {
 		return conn.ParsePing(b)
 	case "select":
 		return conn.ParseSelect(b)
+	case "unwatch":
+		return conn.ParseUnwatch(b)
 
 	// key
 	case "del":

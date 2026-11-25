@@ -26,7 +26,7 @@ func TestHandleSingleHonorsRequestContextDeadline(t *testing.T) {
 	cancel() // pre-cancelled so the repository call fails immediately.
 
 	state := &connState{cmds: []redis.Cmd{ctxParseCmd(t, "SET r7:deadline value")}}
-	handleSingle(ctx, &ctxTestWriter{}, state, db)
+	handleSingle(ctx, &ctxTestWriter{}, state, db, newWatchTracker())
 
 	str := redis.NewRedka(context.Background(), db, 0).Str()
 	if _, err := str.Get("r7:deadline"); !errors.Is(err, core.ErrNotFound) {
@@ -51,7 +51,7 @@ func TestHandleMultiHonorsRequestContextDeadline(t *testing.T) {
 		ctxParseCmd(t, "SET r7:multi:2 b"),
 	}}
 	writer := &ctxTestWriter{}
-	handleMulti(ctx, writer, state, db)
+	handleMulti(ctx, writer, state, db, newWatchTracker())
 
 	if len(writer.errors) != 1 || writer.errors[0] != "ERR EXEC transaction failed" {
 		t.Fatalf("cancelled EXEC responses = %v, want one EXEC transaction failure", writer.errors)
@@ -75,7 +75,7 @@ func TestHandleSingleWithoutContextStillWorks(t *testing.T) {
 
 	state := &connState{cmds: []redis.Cmd{ctxParseCmd(t, "SET r7:fallback value")}}
 	// nil ctx simulates a caller that does not propagate a deadline.
-	handleSingle(context.Background(), &ctxTestWriter{}, state, db)
+	handleSingle(context.Background(), &ctxTestWriter{}, state, db, newWatchTracker())
 
 	str := redis.NewRedka(context.Background(), db, 0).Str()
 	got, err := str.Get("r7:fallback")

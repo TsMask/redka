@@ -28,6 +28,7 @@ type Server struct {
 	addr string
 	srv  *redcon.Server
 	db   *store.Store
+	ln   net.Listener
 
 	mu        sync.Mutex
 	state     serverState
@@ -61,7 +62,7 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 	// Create slowlog with config values (threshold in ms → Duration)
 	slowLog := slowlog.New(cfg.SlowlogMaxLen, time.Duration(cfg.SlowlogThreshold)*time.Millisecond)
 
-	handler := createHandlers(db, clientRegistry, slowLog)
+	handler, tracker := createHandlers(db, clientRegistry, slowLog)
 
 	accept := func(conn redcon.Conn) bool {
 		// Check max clients limit
@@ -88,6 +89,16 @@ func NewWithConfig(net string, addr string, db *store.Store, cfg *config.ServerC
 		return true
 	}
 	closed := func(conn redcon.Conn, err error) {
+		if raw := conn.Context(); raw != nil {
+			if m, ok := raw.(*sync.Map); ok {
+				if v, ok := m.Load(ctxKeyState); ok {
+					if state, ok := v.(*connState); ok {
+						state.clearWatches(tracker)
+					}
+				}
+			}
+		}
+
 		// Get client ID from context to unregister
 		if raw := conn.Context(); raw != nil {
 			if m, ok := raw.(*sync.Map); ok {
@@ -143,6 +154,7 @@ func (s *Server) Start(ready chan error) error {
 
 	done := make(chan struct{})
 	s.serveDone = done
+	s.ln = ln
 	s.state = serverListening
 	s.mu.Unlock()
 
@@ -187,10 +199,25 @@ func (s *Server) Stop() error {
 			<-done
 		}
 	}
+	s.mu.Lock()
+	s.ln = nil
+	s.mu.Unlock()
 
 	slog.Info("redka stopped", "addr", s.addr)
 	if err != nil {
 		return fmt.Errorf("server close: %w", err)
 	}
 	return nil
+}
+
+// Addr returns the address the server is listening on. It returns nil before
+// the server starts or after it stops.
+func (s *Server) Addr() net.Addr {
+	s.mu.Lock()
+	ln := s.ln
+	s.mu.Unlock()
+	if ln == nil {
+		return nil
+	}
+	return ln.Addr()
 }
